@@ -2,6 +2,7 @@
 #include <GyverOLED.h>
 #include <GyverOLEDMenu.h>
 #include <EncButton.h>
+#include <GyverTimer.h>
 
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
@@ -14,7 +15,9 @@
 // #define MENU_PARAMS_LEFT_OFFSET 68 // 92
 // #define MENU_ITEM_SELECT_W 100 //127
 #define EB_FAST_TIME 120 
+#define DISPLAY_TIMEOUT 5000 // 5sec
 
+GTimer displayIdleTimer(MS);
 EncButton eb(12, 13, 14, INPUT_PULLUP);
 GyverOLED<SSD1306_128x64> oled;
 OledMenu<8, GyverOLED<SSD1306_128x64>> menu(&oled);
@@ -40,6 +43,7 @@ bool isInverted = false;
   u_int checkPeriod = 60; // 60s 
 // }
 
+bool oledEnabled = true;
 
 void setup() {
 #ifdef DEBUG_ENABLE
@@ -66,12 +70,23 @@ void setup() {
   //
   toggleMainScreen(true);
   eb.attach(encoder_cb);
+  displayIdleTimer.setTimeout(DISPLAY_TIMEOUT);
 }
 
 void loop() {
   eb.tick();
+
+  if (displayIdleTimer.isReady()) {
+    idleTrigger();
+  }
 }
 
+void idleTrigger(){
+  oled.clear();
+  menu.showMenu(false, false);
+  oled.setPower(false);
+  oledEnabled = false;
+}
 
 void onMenuItemChange(const int index, const void* val, const byte valType) {
   if (valType == VAL_ACTION) {
@@ -151,26 +166,37 @@ void closeValve() {
   LOGN(" deg");
 }
 
+
 void encoder_cb() {
-  if (menu.isMenuShowing) {
-    switch (eb.action()) {
-      case EB_TURN:
+  switch (eb.action()) {
+    case EB_TURN:
+      if (menu.isMenuShowing) {
         if (eb.dir() == 1) {
           menu.selectPrev(eb.fast());
         } else {
           menu.selectNext(eb.fast());
         }
-  
-        break;
-  
-      case EB_CLICK:
+      }
+      if (!oledEnabled) {
+        oled.setPower(true);
+        oledEnabled = true;
+      }
+      break;
+    case EB_CLICK:
+      if (!oledEnabled) {
+        oled.setPower(true);
+        oledEnabled = true;
+        return;
+      }
+      if (menu.isMenuShowing) {
         menu.toggleChangeSelected();
-        break;
-    }
+      }
+      else {
+        menu.showMenu(true);
+      }
+      break;
   }
-  else { 
-    if (eb.action() == EB_CLICK) {
-      menu.showMenu(true);
-    }
-  }
+
+  displayIdleTimer.reset();
+  displayIdleTimer.setTimeout(DISPLAY_TIMEOUT);
 }
