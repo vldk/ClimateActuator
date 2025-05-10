@@ -15,12 +15,16 @@
 // #define MENU_PARAMS_LEFT_OFFSET 68 // 92
 // #define MENU_ITEM_SELECT_W 100 //127
 #define EB_FAST_TIME 120 
-#define DISPLAY_TIMEOUT 5000 // 5sec
+
+#define DISPLAY_TIMEOUT 60000 //5000 // 5sec
+#define MAX_TEMP 50.0
+#define MIN_TEMP 10.0
 
 GTimer displayIdleTimer(MS);
+GTimer temperatureCheckTimer(MS);
 EncButton eb(12, 13, 14, INPUT_PULLUP);
 GyverOLED<SSD1306_128x64> oled;
-OledMenu<8, GyverOLED<SSD1306_128x64>> menu(&oled);
+OledMenu<10, GyverOLED<SSD1306_128x64>> menu(&oled);
 
 void toggleMainScreen(bool show);
 void renderMainScreen();
@@ -30,20 +34,22 @@ void encoder_cb();
 void openValve();
 void closeValve();
 void idleTrigger();
+void checkTemperature();
 
 
 float cur_t = 24.8;
 float cur_h = 45.9;
 
-bool isInverted = false;
 // struct settings {
   float lowTemp = 22;
   float highTemp = 25;
   float turns = 1.2;
-  u_int checkPeriod = 60; // 60s 
+  bool isInverted = false;
+  u_int checkPeriod = 20; // 60s 
 // }
 
 bool oledEnabled = true;
+bool isValveOpened = true; // TODO: probably need to use endstop
 
 void setup() {
 #ifdef DEBUG_ENABLE
@@ -61,37 +67,57 @@ void setup() {
   
   menu.addItem(PSTR("ВIДКРИТИ"));                                                                   // 0
   menu.addItem(PSTR("ЗАКРИТИ"));                                                                    // 1
-  menu.addItem(PSTR("ТЕМР. ВIДК."), GM_N_FLOAT(0.5), &highTemp, &lowTemp, GM_N_FLOAT(60));          // 2
-  menu.addItem(PSTR("ТЕМР. ЗАКР."), GM_N_FLOAT(0.5), &lowTemp, GM_N_FLOAT(10), &highTemp);          // 3
+  menu.addItem(PSTR("ТЕМР. ВIДК."), GM_N_FLOAT(0.5), &highTemp, &lowTemp, GM_N_FLOAT(MAX_TEMP));    // 2
+  menu.addItem(PSTR("ТЕМР. ЗАКР."), GM_N_FLOAT(0.5), &lowTemp, GM_N_FLOAT(MIN_TEMP), &highTemp);    // 3
   menu.addItem(PSTR("ПЕРІОД (c)"),  GM_N_U_INT(10), &checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));// 4
   menu.addItem(PSTR("К-ТЬ ОБЕРТ."), GM_N_FLOAT(0.01), &turns, GM_N_FLOAT(0.01), GM_N_FLOAT(10));    // 5
   menu.addItem(PSTR("IНВЕРТУВАТИ"), &isInverted);                                                   // 6
-  menu.addItem(PSTR("<- ВИХIД"));                                                                   // 7
+  menu.addItem(PSTR("СКИНУТИ"));                                                                    // 7
+  menu.addItem(PSTR("<- ВИХIД"));                                                                   // 8
+  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 9 // just for testing
   //
   toggleMainScreen(true);
   eb.attach(encoder_cb);
-  displayIdleTimer.setTimeout(DISPLAY_TIMEOUT);
+  displayIdleTimer.setTimeout(DISPLAY_TIMEOUT); 
+
+  checkTemperature();
+  temperatureCheckTimer.setInterval(checkPeriod * 1000);
 }
 
 void loop() {
   eb.tick();
 
-  if (displayIdleTimer.isReady()) {
-    idleTrigger();
+  if (displayIdleTimer.isReady()) idleTrigger();
+  if (temperatureCheckTimer.isReady()) checkTemperature();
+
+  // renderMainScreen();
+
+}
+
+void checkTemperature() {
+  LOG("LOW: "); LOG(lowTemp); LOG(" CUR: "); LOG(cur_t); LOG(" HI: "); LOGN(highTemp);
+  
+  if (cur_t >= highTemp) {
+    openValve();
+  } else if (cur_t < lowTemp) {
+    closeValve();
   }
 }
 
 void idleTrigger(){
+  menu.showMenu(false, true);
   oled.clear();
-  menu.showMenu(false, false);
   oled.setPower(false);
   oledEnabled = false;
 }
 
 void onMenuItemChange(const int index, const void* val, const byte valType) {
   if (valType == VAL_ACTION) {
-    if (index == 7) {
+    if (index == 8) {
       toggleMainScreen(true);
+    }
+    else if (index == 4) {
+      temperatureCheckTimer.setInterval(checkPeriod * 1000);
     }
     else if (index == 0) {
       openValve();
@@ -132,18 +158,23 @@ void toggleMainScreen(bool show) {
 }
 
 void renderMainScreen() {
+  // if (!oledEnabled || menu.isMenuShowing) return;
   oled.clear();   
   oled.update();
 
   // --------------------------
   char temp_str[32];
-  snprintf(temp_str, sizeof(temp_str), "Т:%.2fC%", cur_t);
+  snprintf(temp_str, sizeof(temp_str), "T:%.1fC%", cur_t);
   oled.setCursor(1, 0); 
   oled.setScale(3);
   oled.print(temp_str);
 
-  // oled.setScale(1);
-  // oled.println();
+  oled.setScale(2);
+  oled.setCursorXY(0, 31);
+  oled.print("VP: "); oled.print(isValveOpened ? "ВIДК" : "ЗАКР");
+  oled.update();
+
+
   oled.update();
   char hum_str[32];
   snprintf(hum_str, sizeof(hum_str), "Вол: %.2f%%", cur_h);
@@ -155,17 +186,27 @@ void renderMainScreen() {
 }
 
 void openValve() {
+  if (isValveOpened) {
+    LOGN("Value is opened already. Noting to do.");
+    return;
+  }
+
   LOG("Open valve open with ");
   LOG( (360 * turns) * (isInverted? -1 : 1) );
   LOGN(" deg");
+
+  isValveOpened = true;
 }
 
 void closeValve() {
+  if (!isValveOpened) {
+    LOGN("Value is closed already. Noting to do.");
+  }
   LOG("Close valve with ");
   LOG( (360 * turns) * (isInverted? 1 : -1) );
   LOGN(" deg");
+  isValveOpened = false;
 }
-
 
 void encoder_cb() {
   switch (eb.action()) {
@@ -186,6 +227,7 @@ void encoder_cb() {
       if (!oledEnabled) {
         oled.setPower(true);
         oledEnabled = true;
+        renderMainScreen();
         return;
       }
       if (menu.isMenuShowing) {
