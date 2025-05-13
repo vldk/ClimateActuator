@@ -27,15 +27,24 @@
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
 #define TIME_TO_SLEEP  10          /* Time ESP32 will go to sleep (in seconds) */
 
+
+#ifdef ESP32C3
+const int USE_BUFFER = OLED_NO_BUFFER;
+#define ENC_L GPIO_NUM_1
+#define ENC_R GPIO_NUM_2
+#define ENC_BTN GPIO_NUM_3
+
+#else
+const int USE_BUFFER = OLED_BUFFER;
 #define ENC_L GPIO_NUM_12
 #define ENC_R GPIO_NUM_13
 #define ENC_BTN GPIO_NUM_14
+#endif
 
 GTimer displayIdleTimer(MS);
-// GTimer temperatureCheckTimer(MS);
 EncButton eb(ENC_L, ENC_R, ENC_BTN, INPUT_PULLUP);
-GyverOLED<SSD1306_128x64> oled;
-OledMenu<10, GyverOLED<SSD1306_128x64>> menu(&oled);
+GyverOLED<SSD1306_128x64, USE_BUFFER> oled;
+OledMenu<10, GyverOLED<SSD1306_128x64, USE_BUFFER>> menu(&oled);
 
 
 void initMenu();
@@ -104,7 +113,7 @@ void define_wakeup_reason(){
 void setup() {
 #ifdef DEBUG_ENABLE
   Serial.begin(115200);
-  // delay(1000);
+  delay(5000);
 #endif
   
   define_wakeup_reason();
@@ -113,7 +122,6 @@ void setup() {
   initOled();
   initMenu();
   initServo();
-    
   if (isButtonWakeup || !isSleepWakeup) {
     wakeDisplayTrigger();
     toggleMainScreen(true);
@@ -121,10 +129,14 @@ void setup() {
   }
 
   // esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK(ENC_BTN), ESP_EXT1_WAKEUP_ANY_HIGH);
+  #ifdef ESP32C3
+  gpio_wakeup_enable(ENC_BTN, GPIO_INTR_LOW_LEVEL);
+  esp_sleep_enable_gpio_wakeup();
+  #else
   esp_sleep_enable_ext0_wakeup(ENC_BTN, 0);  //1 = High, 0 = Low
-  
   rtc_gpio_pullup_en(ENC_BTN);
   rtc_gpio_pulldown_dis(ENC_BTN);
+  #endif
 
   esp_sleep_enable_timer_wakeup(checkPeriod * uS_TO_S_FACTOR);
   eb.tick();
@@ -132,11 +144,11 @@ void setup() {
 }
 
 void loop() {
-  // LOGN("Loop tick");
+  // LOG("Loop tick: "); LOGN(displayIdleTimer.isReady());
   eb.tick();
 
   if (displayIdleTimer.isReady()) idleDisplayTrigger();
-  // if (temperatureCheckTimer.isReady()) checkTemperature();
+
   // renderMainScreen();
 }
 
@@ -164,7 +176,6 @@ void initMenu() {
   menu.addItem(PSTR("<- ВИХIД"));                                                                   // 8
   menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 9 // just for testing
 
-  
   eb.attach(encoder_cb);
 }
 
@@ -191,10 +202,8 @@ void checkTemperature() {
 
 
 void goToSleep() {
-  // #ifndef DEBUG_ENABLE  
   LOGN("Going to sleep now. Would wakeup after " + String(checkPeriod) + " seconds.");
   esp_deep_sleep_start();
-  // #endif
 }
 
 void idleDisplayTrigger(){
