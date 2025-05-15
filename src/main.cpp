@@ -1,9 +1,11 @@
 #include <Arduino.h>
-#include <GyverOLED.h>
-#include <GyverOLEDMenu.h>
 #include <EncButton.h>
-#include <GyverTimer.h>
-#include "driver/rtc_io.h"
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include "GOledMenuAda.h"
+
 
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
@@ -13,56 +15,28 @@
 #define LOGN(x)
 #endif
 
-// #define MENU_PARAMS_LEFT_OFFSET 68 // 92
-// #define MENU_ITEM_SELECT_W 100 //127
-#define EB_FAST_TIME 120 
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
 
-
-#define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
-
-#define DISPLAY_TIMEOUT 5000 //5000 // 5sec
-#define MAX_TEMP 50.0
-#define MIN_TEMP 10.0
-
-#define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
-#define TIME_TO_SLEEP  10          /* Time ESP32 will go to sleep (in seconds) */
-
-
-#ifdef ESP32C3
-const int USE_BUFFER = OLED_NO_BUFFER;
 #define ENC_L GPIO_NUM_1
 #define ENC_R GPIO_NUM_2
 #define ENC_BTN GPIO_NUM_3
 
-#else
-const int USE_BUFFER = OLED_BUFFER;
-#define ENC_L GPIO_NUM_12
-#define ENC_R GPIO_NUM_13
-#define ENC_BTN GPIO_NUM_14
-#endif
-
-GTimer displayIdleTimer(MS);
+// Declaration for an SSD1306 display connected to I2C (SDA, SCL pins)
+// The pins for I2C are defined by the Wire-library. 
+// On an arduino UNO:       A4(SDA), A5(SCL)
+// On an arduino MEGA 2560: 20(SDA), 21(SCL)
+// On an arduino LEONARDO:   2(SDA),  3(SCL), ...
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C //0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 EncButton eb(ENC_L, ENC_R, ENC_BTN, INPUT_PULLUP);
-GyverOLED<SSD1306_128x64, USE_BUFFER> oled;
-OledMenu<10, GyverOLED<SSD1306_128x64, USE_BUFFER>> menu(&oled);
 
+OledMenu<9, Adafruit_SSD1306> menu(&oled);
 
-void initMenu();
-void initServo();
-void initOled();
-void toggleMainScreen(bool show);
-void renderMainScreen();
-void onMenuItemChange(const int index, const void* val, const byte valType);
-bool onMenuItemPrintOverride(const int index, const void* val, const byte valType);
-void encoder_cb();
-void openValve();
-void closeValve();
-void idleDisplayTrigger();
-void wakeDisplayTrigger();
-void goToSleep();
-void checkTemperature();
-bool isIdleState();
-
+#define DISPLAY_TIMEOUT 5000 //5000 // 5sec
+#define MAX_TEMP 50.0
+#define MIN_TEMP 10.0
 
 RTC_DATA_ATTR float cur_t = 24.8; // TODO: remove RTC_DATA_ATTR after attach DHT11 sensor
 float cur_h = 45.9;
@@ -81,164 +55,97 @@ bool isSleepWakeup = false;
 bool isButtonWakeup = false;
 
 
-// Method to print the reason by which ESP32 has been awaken from sleep
-void define_wakeup_reason(){
-  esp_sleep_wakeup_cause_t wakeup_reason;
+void encoder_cb() {
+  switch (eb.action()) {
+    case EB_TURN:
+      LOG(F("TURN:")); LOGN(eb.dir());
 
-  wakeup_reason = esp_sleep_get_wakeup_cause();
-
-  switch(wakeup_reason)
-  {
-    case ESP_SLEEP_WAKEUP_EXT0 : 
-    case ESP_SLEEP_WAKEUP_EXT1 :  
-      isButtonWakeup = true;
-      isSleepWakeup = true;
-      // LOGN("Wakeup caused by external signal using RTC_CNTL"); 
+      // if (menu.isMenuShowing) {
+        if (eb.dir() == 1) {
+          menu.selectPrev(eb.fast());
+        } else {
+          menu.selectNext(eb.fast());          
+        }
+      // }
+      // wakeDisplayTrigger();
       break;
-    case ESP_SLEEP_WAKEUP_TIMER : // Serial.println("Wakeup caused by timer"); break;
-    case ESP_SLEEP_WAKEUP_TOUCHPAD : // Serial.println("Wakeup caused by touchpad"); break;
-    case ESP_SLEEP_WAKEUP_ULP : // Serial.println("Wakeup caused by ULP program"); break;
-      isSleepWakeup = true;
-      isButtonWakeup = false;
-    break;
-    default : {
-      isSleepWakeup = false;
-      isButtonWakeup = false;
-      // Serial.printf("Wakeup was not caused by deep sleep: %d\n",wakeup_reason); break;
-    }
+    case EB_CLICK:
+      LOGN("CLICK");
+      
+      // wakeDisplayTrigger();
+      // if (!oledEnabled) {
+      //   oled.setPower(true);
+      //   oledEnabled = true;
+      //   renderMainScreen();
+      //   return;
+      // }
+      if (menu.isMenuShowing) {
+        menu.toggleChangeSelected();
+      }
+      else {
+        menu.showMenu(true);
+      }
+      break;
   }
+
+  // displayIdleTimer.reset();
+  // displayIdleTimer.setTimeout(DISPLAY_TIMEOUT);
 }
 
 
-void setup() {
-#ifdef DEBUG_ENABLE
-  Serial.begin(115200);
-  delay(5000);
-#endif
+void initDisplay() {
   
-  define_wakeup_reason();
-  LOGN("Is awaked from sleep?: " + String(isSleepWakeup));
-  LOGN("Is awaked by Btn?: " + String(isButtonWakeup));
-  initOled();
-  initMenu();
-  initServo();
-  if (isButtonWakeup || !isSleepWakeup) {
-    wakeDisplayTrigger();
-    toggleMainScreen(true);
-    displayIdleTimer.setTimeout(DISPLAY_TIMEOUT); 
+  Wire.begin(7,9);      
+  //SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
+  if(!oled.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    LOGN(F("SSD1306 allocation failed"));
   }
+  LOGN(F("SSD1306 allocation OK"));
+  // u8g2_for_adafruit_gfx.begin(oled);
+  // u8g2_for_adafruit_gfx.setFont(u8g2_font_4x6_t_cyrillic);  // icon font
 
-  // esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK(ENC_BTN), ESP_EXT1_WAKEUP_ANY_HIGH);
-  #ifdef ESP32C3
-  gpio_wakeup_enable(ENC_BTN, GPIO_INTR_LOW_LEVEL);
-  esp_sleep_enable_gpio_wakeup();
-  #else
-  esp_sleep_enable_ext0_wakeup(ENC_BTN, 0);  //1 = High, 0 = Low
-  rtc_gpio_pullup_en(ENC_BTN);
-  rtc_gpio_pulldown_dis(ENC_BTN);
-  #endif
-
-  esp_sleep_enable_timer_wakeup(checkPeriod * uS_TO_S_FACTOR);
-  eb.tick();
-  checkTemperature();
-}
-
-void loop() {
-  // LOG("Loop tick: "); LOGN(displayIdleTimer.isReady());
-  eb.tick();
-
-  if (displayIdleTimer.isReady()) idleDisplayTrigger();
-
-  // renderMainScreen();
-}
-
-void initOled() {
-  // display init
-  oled.init();
-  Wire.setClock(400000L);
-  oled.clear();
-  oled.update();
-}
-
-void initMenu() {
-  // menu init
-  menu.onChange(onMenuItemChange, true);
-  menu.onPrintOverride(onMenuItemPrintOverride);
+  // do not show Adafruit logo
+  oled.clearDisplay();
+  oled.drawPixel(10, 10, SSD1306_WHITE);
+  oled.display();
+  oled.cp437(true);
   
-  menu.addItem(PSTR("ВIДКРИТИ"));                                                                   // 0
-  menu.addItem(PSTR("ЗАКРИТИ"));                                                                    // 1
-  menu.addItem(PSTR("ТЕМР. ВIДК."), GM_N_FLOAT(0.5), &highTemp, &lowTemp, GM_N_FLOAT(MAX_TEMP));    // 2
-  menu.addItem(PSTR("ТЕМР. ЗАКР."), GM_N_FLOAT(0.5), &lowTemp, GM_N_FLOAT(MIN_TEMP), &highTemp);    // 3
-  menu.addItem(PSTR("ПЕРІОД (c)"),  GM_N_U_INT(10), &checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));// 4
-  menu.addItem(PSTR("К-ТЬ ОБЕРТ."), GM_N_FLOAT(0.01), &turns, GM_N_FLOAT(0.01), GM_N_FLOAT(10));    // 5
-  menu.addItem(PSTR("IНВЕРТУВАТИ"), &isInverted);                                                   // 6
-  menu.addItem(PSTR("СКИНУТИ"));                                                                    // 7
-  menu.addItem(PSTR("<- ВИХIД"));                                                                   // 8
-  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 9 // just for testing
+  oled.setTextSize(1);             // Normal 1:1 pixel scale
+  oled.setTextColor(SSD1306_WHITE);        // Draw white text
+  oled.setCursor(0,0);             // Start at top-left corner
+  oled.println(F("Loaded"));
+  oled.display();
 
-  eb.attach(encoder_cb);
-}
+  delay(3000);
+  // tests
+  oled.clearDisplay();
 
-void initServo() {
-
-}
-
-bool isIdleState() {
-  return !oledEnabled;
-}
-
-void checkTemperature() {
-  LOGN("display on: " + String(oledEnabled) + " opened: " + String(isValveOpened));
-  LOG("LOW: "); LOG(lowTemp); LOG(" CUR: "); LOG(cur_t); LOG(" HI: "); LOGN(highTemp);
+  oled.drawRect(1,1, 127, 8, WHITE);
+  oled.setCursor(1, 1);
+  oled.setTextColor(BLACK, WHITE);
+  oled.print("Some text");
   
-  if (cur_t >= highTemp) {
-    openValve();
-  } else if (cur_t < lowTemp) {
-    closeValve();
-  }
+  oled.display();
 
-  if (isIdleState()) goToSleep();
+  oled.setTextColor(WHITE, BLACK);
+  oled.display();
+  // delay(2000); 
+  // oled.setTextSize(1);             // Normal 1:1 pixel scale
+  // oled.setTextColor(SSD1306_WHITE);        // Draw white text
+  // oled.setCursor(0,0);             // Start at top-left corner
+  // oled.println(F("Hello, world!"));
+
+  // oled.setTextColor(SSD1306_BLACK, SSD1306_WHITE); // Draw 'inverse' text
+  // oled.println(3.141592);
+
+  // oled.setTextSize(2);             // Draw 2X-scale text
+  // oled.setTextColor(SSD1306_WHITE);
+  // oled.print(F("0x")); oled.println(0xDEADBEEF, HEX);
+
+  // oled.display();
+  // delay(2000);
 }
 
-
-void goToSleep() {
-  LOGN("Going to sleep now. Would wakeup after " + String(checkPeriod) + " seconds.");
-  esp_deep_sleep_start();
-}
-
-void idleDisplayTrigger(){
-  menu.showMenu(false, true);
-  oled.clear();
-  oled.setPower(false);
-  oledEnabled = false;
-  goToSleep();
-}
-
-void wakeDisplayTrigger() {
-  if (!oledEnabled) {
-    oled.setPower(true);
-    oledEnabled = true;
-  }
-  // menu.showMenu(false, true);
-  // oled.clear();
-  
-}
-
-void onMenuItemChange(const int index, const void* val, const byte valType) {
-  if (valType == VAL_ACTION) {
-    if (index == 8) {
-      toggleMainScreen(true);
-    }
-    // else if (index == 4) {
-    //   temperatureCheckTimer.setInterval(checkPeriod * 1000);
-    // }
-    else if (index == 0) {
-      openValve();
-    } else if (index == 1) {
-      closeValve();
-    }
-  }
-}
 
 boolean onMenuItemPrintOverride(const int index, const void* val, const byte valType) {
   if (index == 4) {
@@ -261,98 +168,75 @@ boolean onMenuItemPrintOverride(const int index, const void* val, const byte val
   return false;
 }
 
-void toggleMainScreen(bool show) {
-  if (show == true) {
-    menu.showMenu(false);
-    renderMainScreen();
-  } else {
-    menu.showMenu(true);
-  }
+void initMenu() {
+  // menu init
+  // menu.onChange(onMenuItemChange, true);
+  menu.onPrintOverride(onMenuItemPrintOverride);
+  
+  menu.addItem(PSTR("OPEN"));                                                                   // 0
+  menu.addItem(PSTR("CLOSE"));                                                                    // 1
+  menu.addItem(PSTR("Temp. open"), GM_N_FLOAT(0.5), &highTemp, &lowTemp, GM_N_FLOAT(MAX_TEMP));    // 2
+  menu.addItem(PSTR("Temp. close"), GM_N_FLOAT(0.5), &lowTemp, GM_N_FLOAT(MIN_TEMP), &highTemp);    // 3
+  menu.addItem(PSTR("PERIOD (s)"),  GM_N_U_INT(10), &checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));// 4
+  menu.addItem(PSTR("ROTATIONS"), GM_N_FLOAT(0.01), &turns, GM_N_FLOAT(0.01), GM_N_FLOAT(10));    // 5
+  menu.addItem(PSTR("Invert"), &isInverted);                                                   // 6
+  menu.addItem(PSTR("RESET"));                                                                    // 7
+  menu.addItem(PSTR("<<< EXIT"));                                                                   // 8
+  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 9 // just for testing
+
+  
+  eb.attach(encoder_cb);
 }
 
+
 void renderMainScreen() {
-  LOGN("render main> enabled: "+ String(oledEnabled) + " menu is showing: " + String(menu.isMenuShowing));
-  LOGN("exit?: " + String(!oledEnabled || menu.isMenuShowing));
+  LOGN("render main> enabled: "+ String(oledEnabled) + " menu is showing: " /* + String(menu.isMenuShowing) */);
+  // LOGN("exit?: " + String(!oledEnabled || menu.isMenuShowing));
   // if (!oledEnabled || menu.isMenuShowing) return;
-  oled.clear();   
-  oled.update();
+  // oled.clearDisplay();   
+  // oled.display();
 
-  // --------------------------
-  char temp_str[32];
-  snprintf(temp_str, sizeof(temp_str), "T:%.1fC%", cur_t);
-  oled.setCursor(1, 0); 
-  oled.setScale(3);
-  oled.print(temp_str);
+  // oled.setTextColor(SSD1306_WHITE); // Draw white text
+  // oled.setCursor(0, 0);     // Start at top-left corner
+  // oled.cp437(true);         // Use full 256 char 'Code Page 437' font
 
-  oled.setScale(2);
-  oled.setCursorXY(0, 31);
-  oled.print("VP: "); oled.print(isValveOpened ? "ВIДК" : "ЗАКР");
-  oled.update();
+  // // --------------------------
+  // char temp_str[32];
+  // snprintf(temp_str, sizeof(temp_str), "T:%.1fC%", cur_t);
+  // oled.setCursor(1, 0); 
+  // oled.setTextSize(3);
+  // oled.print(temp_str);
 
+  // oled.setTextSize(2);
+  // oled.setCursor(0, 31);
+  // oled.print("VP: "); oled.print(isValveOpened ? "ВIДК" : "ЗАКР");
+  
 
-  oled.update();
-  char hum_str[32];
-  snprintf(hum_str, sizeof(hum_str), "Вол: %.2f%%", cur_h);
-  oled.setScale(1);
-  oled.setCursor(1, 6);
-  oled.print(hum_str);
-  oled.update();
+  // char hum_str[32];
+  // snprintf(hum_str, sizeof(hum_str), "Вол: %.2f%%", cur_h);
+  // oled.setTextSize(1);
+  // oled.setCursor(1, 6);
+  // oled.print(hum_str);
+  // oled.display();
   
 }
 
-void openValve() {
-  if (isValveOpened) {
-    LOGN(">>>> Value is opened already. Noting to do.");
-    return;
-  }
+void setup() {
+  #ifdef DEBUG_ENABLE
+  Serial.begin(115200);
+  delay(5000);
+  #endif
 
-  LOG("!!!! Open valve open with ");
-  LOG( (360 * turns) * (isInverted? -1 : 1) );
-  LOGN(" deg");
+  initDisplay();
+  initMenu();
+  // menu.showMenu(true);
+  // renderMainScreen();
 
-  isValveOpened = true;
 }
 
-void closeValve() {
-  if (!isValveOpened) {
-    LOGN("<<<< Value is closed already. Noting to do.");
-    return;
-  }
-  LOG("!!!! Close valve with ");
-  LOG( (360 * turns) * (isInverted? 1 : -1) );
-  LOGN(" deg");
-  isValveOpened = false;
-}
+void loop() {
+  // LOGN("Loop tick");
+  eb.tick();
 
-void encoder_cb() {
-  switch (eb.action()) {
-    case EB_TURN:
-      if (menu.isMenuShowing) {
-        if (eb.dir() == 1) {
-          menu.selectPrev(eb.fast());
-        } else {
-          menu.selectNext(eb.fast());
-        }
-      }
-      wakeDisplayTrigger();
-      break;
-    case EB_CLICK:
-      wakeDisplayTrigger();
-      // if (!oledEnabled) {
-      //   oled.setPower(true);
-      //   oledEnabled = true;
-      //   renderMainScreen();
-      //   return;
-      // }
-      if (menu.isMenuShowing) {
-        menu.toggleChangeSelected();
-      }
-      else {
-        menu.showMenu(true);
-      }
-      break;
-  }
-
-  displayIdleTimer.reset();
-  displayIdleTimer.setTimeout(DISPLAY_TIMEOUT);
+  // if (displayIdleTimer.isReady()) idleDisplayTrigger();
 }
