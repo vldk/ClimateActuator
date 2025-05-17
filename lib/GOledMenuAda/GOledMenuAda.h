@@ -74,23 +74,19 @@ public:
   }
 
   void drawItem(const boolean update = false) {
-    // _oled->clearDisplay();
-    _oled->drawRect(_x, _y, MENU_ITEM_SELECT_W, _y1 - _y, (isSelect && !isChange) ? WHITE : BLACK);
-
+    // _oled->rect(_x, _y, MENU_ITEM_SELECT_W, _y1, (isSelect && !isChange) ? OLED_FILL : OLED_CLEAR);
+    // if (isChange) {
+    //   _oled->roundRect(MENU_PARAMS_LEFT_OFFSET - 4, _y, MENU_ITEM_SELECT_W, _y1, OLED_STROKE);
+    // }
+    // _oled->textMode((isSelect && !isChange) ? BUF_SUBTRACT : BUF_ADD);
+    _oled->setTextSize(1);
+    _oled->fillRect(_x, _y, MENU_ITEM_SELECT_W, _y1 - _y,(isSelect && !isChange) ? WHITE : BLACK);
     if (isChange) {
-      _oled->drawRoundRect(MENU_PARAMS_LEFT_OFFSET - 4, _y, MENU_ITEM_SELECT_W - MENU_PARAMS_LEFT_OFFSET + 4, _y1 -_y + 1, 3, SSD1306_WHITE);
+      _oled->drawRoundRect(MENU_PARAMS_LEFT_OFFSET - 4, _y, MENU_ITEM_SELECT_W - MENU_PARAMS_LEFT_OFFSET + 4, _y1 -_y + 1, 2, WHITE);
     }
-
-    if (isSelect && !isChange) {
-        _oled->fillRect(_x, _y, MENU_ITEM_SELECT_W, _y1 - _y, WHITE);
-        _oled->setTextColor(BLACK, WHITE);
-    } else {
-        _oled->setTextColor(WHITE, BLACK);
-    }
-
-
+    _oled->setTextColor((isSelect && !isChange) ? INVERSE: WHITE);
+    //
     _oled->setCursor(_x + MENU_ITEM_PADDING_LEFT, _text_y);
-
     _oled->print((const __FlashStringHelper*)_str);
 
 
@@ -297,7 +293,8 @@ public:
   }
 
 private:
-  TGyverOLED* _oled = nullptr;
+  // TGyverOLED* _oled = nullptr;
+  Adafruit_SSD1306* _oled = nullptr;
   int _index = 0;
   const void* _str = nullptr;
   int _x;
@@ -314,24 +311,19 @@ private:
   boolean cbImmediate = false;
 
   void prepareValUpdate() {
-    _oled->drawRoundRect(MENU_PARAMS_LEFT_OFFSET - 4, _y, 
-        MENU_ITEM_SELECT_W - MENU_PARAMS_LEFT_OFFSET + 4, 
-        _y1 - _y + 1, 
-        2,
-        WHITE
-    );
-    // _oled->drawRoundRect(
-    //     MENU_PARAMS_LEFT_OFFSET - 4, 
-    //     _y, MENU_ITEM_SELECT_W - MENU_PARAMS_LEFT_OFFSET - 4, 
-    //     _y1 - _y, 
-    //     SSD1306_INVERSE
-    // );
+    // _oled->rect(MENU_PARAMS_LEFT_OFFSET - 4, _y, MENU_ITEM_SELECT_W, _y1, OLED_CLEAR);
+    // _oled->roundRect(MENU_PARAMS_LEFT_OFFSET - 4, _y, MENU_ITEM_SELECT_W, _y1, OLED_STROKE);
 
-    // TODO: fix
     // _oled->textMode(BUF_ADD);
-    _oled->setTextColor(WHITE, BLACK);
+    // _oled->setCursorXY(MENU_PARAMS_LEFT_OFFSET, _text_y);
+
+    byte _w = MENU_ITEM_SELECT_W - MENU_PARAMS_LEFT_OFFSET + 4;
+    byte _h = _y1 - _y + 1;
+    _oled->fillRect(MENU_PARAMS_LEFT_OFFSET - 4, _y, _w, _h, BLACK);
+    _oled->drawRoundRect(MENU_PARAMS_LEFT_OFFSET - 4, _y, _w, _h, 2, WHITE);
+    _oled->setTextColor(WHITE);
     _oled->setCursor(MENU_PARAMS_LEFT_OFFSET, _text_y);
-    _oled->display();
+
   }
 };
 
@@ -584,6 +576,7 @@ private:
   void setDefaultOledParams() {
     //TODO
     // _oled->textMode(BUF_REPLACE); // default in GyverOLED.h
+    _oled->setTextSize(1);
     _oled->setTextColor(WHITE, BLACK);
   }
 };
