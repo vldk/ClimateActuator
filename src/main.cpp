@@ -12,11 +12,11 @@
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
 #define LOGN(x) Serial.println(x)
-#define MENU_ITEMS 10
+#define MENU_ITEMS 11
 #else
 #define LOG(x)
 #define LOGN(x)
-#define MENU_ITEMS 9
+#define MENU_ITEMS 10
 #endif
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
@@ -37,11 +37,11 @@
 
 
 #define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
-#define WAKEUP_1              ENC_BTN         // Only RTC IO are allowed - ESP32 Pin example
-#define WAKEUP_2              WND_SWITCH_PIN    // Only RTC IO are allowed - ESP32 Pin example
+#define WAKEUP_1  ENC_BTN         // Only RTC IO are allowed - ESP32 Pin example
+// #define WAKEUP_2  WND_SWITCH_PIN    // Only RTC IO are allowed - ESP32 Pin example
 
 // Define bitmask for multiple GPIOs
-uint64_t bitmask = BUTTON_PIN_BITMASK(WAKEUP_1) | BUTTON_PIN_BITMASK(WAKEUP_2);
+uint64_t bitmask = BUTTON_PIN_BITMASK(WAKEUP_1) /* | BUTTON_PIN_BITMASK(WAKEUP_2) */;
 
 
 Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
@@ -50,7 +50,6 @@ Button wndSensor(WND_SWITCH_PIN);
 GTimer displayIdleTimer(MS);
 OledMenu<MENU_ITEMS, Adafruit_SSD1306> menu(&oled);
 Preferences prefs;
-
 
 RTC_DATA_ATTR float cur_t = 24.8; // TODO: remove RTC_DATA_ATTR after attach DHT11 sensor
 float cur_h = 45.9;
@@ -61,7 +60,8 @@ struct Settings {
   float highTemp = 25;
   float turns = 1.2;
   bool isInverted = false;
-  u_int checkPeriod = 20; // 60s 
+  bool wndNormalClose = true;
+  u_int checkPeriod = 20; //TODO: set to 60s for prod
 } cfg;
 
 RTC_DATA_ATTR bool oledEnabled = true;
@@ -86,6 +86,8 @@ void wakeDisplayTrigger();
 void goToSleep();
 void checkTemperature();
 bool isIdleState();
+void saveSettings();
+void resetSettings();
 
 
 // Method to print the reason by which ESP32 has been awaken from sleep
@@ -93,9 +95,10 @@ void define_wakeup_reason(){
   esp_sleep_wakeup_cause_t wakeup_reason;
 
   wakeup_reason = esp_sleep_get_wakeup_cause();
-
+  LOG("wake reason: "); LOGN(wakeup_reason);
   switch(wakeup_reason)
   {
+    case ESP_SLEEP_WAKEUP_GPIO: 
     case ESP_SLEEP_WAKEUP_EXT0: 
     case ESP_SLEEP_WAKEUP_EXT1:  
       isButtonWakeup = true;
@@ -109,6 +112,7 @@ void define_wakeup_reason(){
       isButtonWakeup = false;
     break;
     default: {
+      LOGN(wakeup_reason);
       isSleepWakeup = false;
       isButtonWakeup = false;
     }
@@ -149,8 +153,9 @@ void initMenu() {
   menu.addItem(PSTR("PERIOD (s)"),  GM_N_U_INT(10), &cfg.checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));    // 4
   menu.addItem(PSTR("OBERTIV"), GM_N_FLOAT(0.01), &cfg.turns, GM_N_FLOAT(0.01), GM_N_FLOAT(10));            // 5
   menu.addItem(PSTR("INVERTUVATY"), &cfg.isInverted);                                                       // 6
-  menu.addItem(PSTR("RESET"));                                                                          // 7
-  menu.addItem(PSTR("<<< EXIT"));                                                                       // 8
+  menu.addItem(PSTR("ROZM. PRY ZAKR"), &cfg.wndNormalClose);                                                // 7
+  menu.addItem(PSTR("RESET"));                                                                          // 8
+  menu.addItem(PSTR("<<< EXIT"));                                                                       // 9
   #ifdef DEBUG_ENABLE
   menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 9 // just for testing
   #endif
@@ -172,7 +177,6 @@ void toggleMainScreen(bool show) {
 }
 
 void saveSettings() {
-  // EEPROM.put(0, cfg);
   prefs.putBytes("0", &cfg, sizeof(cfg));
   LOGN("Saved to EEPROM");
 }
@@ -185,6 +189,7 @@ void resetSettings() {
   cfg.checkPeriod = def.checkPeriod;
   cfg.turns = def.turns;
   cfg.isInverted = def.isInverted;
+  cfg.wndNormalClose = def.wndNormalClose;
 
   saveSettings();
 }
@@ -228,10 +233,10 @@ void onMenuItemChange(const int index, const void* val, const byte valType) {
     } else if (index == 1) {
       closeValve();
     }  
-    else if (index == 7) {
+    else if (index == 8) {
       resetSettings();
     }
-    else if (index == 8) {
+    else if (index == 9) {
       toggleMainScreen(true);
     }
     #ifdef DEBUG_ENABLE
@@ -241,7 +246,7 @@ void onMenuItemChange(const int index, const void* val, const byte valType) {
     #endif    
   } else {
     #ifdef DEBUG_ENABLE
-    if (index == 9) {
+    if (index == 10) {
       LOG("set manual new temp"); LOGN(cur_t);
     } else
     #endif  
@@ -294,17 +299,16 @@ void renderMainScreen() {
   oled.setTextSize(3);
   oled.print(temp_str); oled.print(char(248)); oled.print("C");
 
-
-  // oled.setTextSize(2);
-  // oled.setCursor(16, SCREEN_HEIGHT - 18);
-  // oled.print(isWndOpened ? "VIDKR." : "ZAKR.");
-  
-  oled.setCursor(0, SCREEN_HEIGHT - 18);
-  oled.setTextSize(1);
-  // oled.setTextWrap(false);
-  oled.print("wakeup?: ");  oled.println(isSleepWakeup);
-  oled.print("by btn?: ");  oled.println(isButtonWakeup);
-
+  // #ifndef DEBUG_ENABLE
+  oled.setTextSize(2);
+  oled.setCursor(16, SCREEN_HEIGHT - 18);
+  oled.print(isWndOpened ? "VIDKR." : "ZAKR.");
+  // #else
+  // oled.setCursor(0, SCREEN_HEIGHT - 18);
+  // oled.setTextSize(1);
+  // oled.print("wakeup?: ");  oled.print(isSleepWakeup); oled.print(" boots: "); oled.println(bootCount);
+  // oled.print("by btn?: ");  oled.println(isButtonWakeup);
+  // #endif
 
   oled.display();
 }
@@ -379,9 +383,10 @@ void closeValve() {
 }
 
 void on_wnd_switch_change() {
-  LOG("on_wnd_switch_change: "); LOGN(digitalRead(WND_SWITCH_PIN));
-  isWndOpened = !digitalRead(WND_SWITCH_PIN);
-  digitalWrite(LED_PIN, !isWndOpened); 
+  bool state = digitalRead(WND_SWITCH_PIN);
+  LOG("on_wnd_switch_change: "); LOGN(state);
+  isWndOpened = cfg.wndNormalClose ? !state: state;
+  digitalWrite(LED_PIN, isWndOpened);
   if (!menu.isMenuShowing) {
     renderMainScreen();
   }
@@ -395,15 +400,10 @@ void setup() {
 
   prefs.begin("0");
   prefs.getBytes("0", &cfg, sizeof(cfg));
-  // LOG("eeprom len: "); LOGN(EEPROM.length());
-  // EEPROM.get(0, cfg);  
-
-  LOG("highTemp: ");LOGN(cfg.highTemp);
 
   pinMode(LED_PIN, OUTPUT);  
   pinMode(WND_SWITCH_PIN, INPUT_PULLUP);
-  // attachInterrupt(WND_SWITCH_PIN, on_wnd_switch_change, CHANGE);
-  // wndSensor.attach(on_wnd_switch_change);
+  wndSensor.attach(on_wnd_switch_change);
   
   define_wakeup_reason();
   LOGN("Is awaked from sleep?: " + String(isSleepWakeup));
@@ -425,20 +425,26 @@ void setup() {
   #ifdef ENABLE_SLEEP
   // esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK(ENC_BTN), ESP_EXT1_WAKEUP_ANY_HIGH);
     #ifdef ESP32C3
-    // gpio_wakeup_enable(ENC_BTN, GPIO_INTR_LOW_LEVEL);
-    // gpio_set_direction(gpio_num_t(ENC_BTN), GPIO_MODE_INPUT);
-    // esp_sleep_enable_gpio_wakeup();
-      //Use ext1 as a wake-up source
 
-      // esp_sleep_enable_ext1_wakeup_io(bitmask, ESP_EXT1_WAKEUP_ANY_HIGH);
-      esp_deep_sleep_enable_gpio_wakeup(bitmask, ESP_GPIO_WAKEUP_GPIO_LOW);
-      // gpio_set_direction(gpio_num_t(WAKEUP_1), GPIO_MODE_INPUT);
-      // gpio_set_direction(gpio_num_t(WAKEUP_2), GPIO_MODE_INPUT);
-      // enable pull-down resistors and disable pull-up resistors
-      // rtc_gpio_pullup_en(WAKEUP_1);
-      // rtc_gpio_pulldown_dis(WAKEUP_1);
-      // rtc_gpio_pulldown_en(WAKEUP_2);
-      // rtc_gpio_pullup_dis(WAKEUP_2);
+    gpio_deep_sleep_hold_dis();
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+    esp_deep_sleep_enable_gpio_wakeup(bitmask, ESP_GPIO_WAKEUP_GPIO_LOW);
+    // esp_err_t errPD = esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+    // Serial.print("esp_sleep_pd_config: ");
+    // switch(errPD) {
+    //   case ESP_OK: Serial.println("ESP_OK"); break;
+    //   case ESP_ERR_INVALID_ARG: Serial.println("ESP_ERR_INVALID_ARG"); break;
+    //   default: Serial.println("None"); break;
+    // }
+    // esp_err_t errGPIO = esp_deep_sleep_enable_gpio_wakeup(bitmask, ESP_GPIO_WAKEUP_GPIO_LOW);
+    // Serial.print("esp_deep_sleep_enable_gpio_wakeup: ");
+    // switch(errGPIO) {
+    //   case ESP_OK: Serial.println("ESP_OK"); break;
+    //   case ESP_ERR_INVALID_ARG: Serial.println("ESP_ERR_INVALID_ARG"); break;
+    //   default: Serial.println("None"); break;
+    // }
+    gpio_set_direction(WAKEUP_1, GPIO_MODE_INPUT);
+    
     #else // esp32-dev
     esp_sleep_enable_ext0_wakeup(ENC_BTN, 0);  //1 = High, 0 = Low
     rtc_gpio_pullup_en(ENC_BTN);
@@ -455,6 +461,6 @@ void setup() {
 void loop() {
   // LOGN("Loop tick");
   eb.tick();
-  // wndSensor.tick();
+  wndSensor.tick();
   if (displayIdleTimer.isReady()) idleDisplayTrigger();
 }
