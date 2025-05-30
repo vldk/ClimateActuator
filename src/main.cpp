@@ -6,13 +6,14 @@
 #include <Adafruit_SSD1306.h>
 #include <GyverTimer.h>
 #include <Preferences.h>
+#include <ServoSmooth.h>
 #include "GOledMenuAda.h"
 #include "driver/rtc_io.h"
 
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
 #define LOGN(x) Serial.println(x)
-#define MENU_ITEMS 11
+#define MENU_ITEMS 12
 #else
 #define LOG(x)
 #define LOGN(x)
@@ -30,6 +31,7 @@
 
 #define LED_PIN GPIO_NUM_8
 #define WND_SWITCH_PIN GPIO_NUM_4
+#define SERVO_PIN GPIO_NUM_10
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
 #define DISPLAY_TIMEOUT 5000 //5000 // 5sec
 #define MAX_TEMP 50.0
@@ -49,11 +51,12 @@ EncButton eb(ENC_L, ENC_R, ENC_BTN, INPUT_PULLUP);
 Button wndSensor(WND_SWITCH_PIN);
 GTimer displayIdleTimer(MS);
 OledMenu<MENU_ITEMS, Adafruit_SSD1306> menu(&oled);
+ServoSmooth servo;
 Preferences prefs;
 
 RTC_DATA_ATTR float cur_t = 24.8; // TODO: remove RTC_DATA_ATTR after attach DHT11 sensor
 float cur_h = 45.9;
-
+int rotateAnge = 0;
 
 struct Settings {
   float lowTemp = 22;
@@ -89,6 +92,9 @@ bool isIdleState();
 void saveSettings();
 void resetSettings();
 
+#ifdef DEBUG_ENABLE
+void debug_applyServoAngel();
+#endif
 
 // Method to print the reason by which ESP32 has been awaken from sleep
 void define_wakeup_reason(){
@@ -157,14 +163,17 @@ void initMenu() {
   menu.addItem(PSTR("RESET"));                                                                          // 8
   menu.addItem(PSTR("<<< EXIT"));                                                                       // 9
   #ifdef DEBUG_ENABLE
-  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 9 // just for testing
+  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 10 // just for testing
+  menu.addItem(PSTR("-- SRV -- "), GM_N_INT(5), &rotateAnge, GM_N_INT(0), GM_N_INT(360)); // 11 // just for testing
   #endif
 
   eb.attach(encoder_cb);
 }
 
 void initServo() {
-
+  servo.attach(SERVO_PIN);        // подключить
+  servo.setSpeed(40);    // ограничить скорость
+  servo.setAccel(0.1);   	  // установить ускорение (разгон и торможение)
 }
 
 void toggleMainScreen(bool show) {
@@ -248,7 +257,10 @@ void onMenuItemChange(const int index, const void* val, const byte valType) {
     #ifdef DEBUG_ENABLE
     if (index == 10) {
       LOG("set manual new temp"); LOGN(cur_t);
-    } else
+    } else if (index == 11) {
+      LOG("rotate servo ange:"); LOGN(rotateAnge);
+      debug_applyServoAngel();
+    } else 
     #endif  
     saveSettings();
   }
@@ -461,6 +473,15 @@ void setup() {
 void loop() {
   // LOGN("Loop tick");
   eb.tick();
+  servo.tick();
   wndSensor.tick();
   if (displayIdleTimer.isReady()) idleDisplayTrigger();
 }
+
+
+// --- debug func
+#ifdef DEBUG_ENABLE
+void debug_applyServoAngel() {
+  servo.setCurrentDeg(rotateAnge);
+}
+#endif
