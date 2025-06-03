@@ -13,11 +13,11 @@
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
 #define LOGN(x) Serial.println(x)
-#define MENU_ITEMS 12
+#define MENU_ITEMS 10
 #else
 #define LOG(x)
 #define LOGN(x)
-#define MENU_ITEMS 10
+#define MENU_ITEMS 8
 #endif
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
@@ -30,12 +30,14 @@
 #define ENC_BTN GPIO_NUM_3
 
 #define LED_PIN GPIO_NUM_8
-#define WND_SWITCH_PIN GPIO_NUM_4
+#define HIGHT_ENDSTOP_PIN GPIO_NUM_4
+#define LOW_ENDSTOP_PIN GPIO_NUM_21
 #define SERVO_PIN GPIO_NUM_10
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
-#define DISPLAY_TIMEOUT 5000 //5000 // 5sec
+#define DISPLAY_TIMEOUT 120000 //5000 // 5sec
 #define MAX_TEMP 50.0
 #define MIN_TEMP 10.0
+#define KICK_DELAY 1000 // freeze for 1 sec during rotation start
 
 
 #define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
@@ -48,30 +50,46 @@ uint64_t bitmask = BUTTON_PIN_BITMASK(WAKEUP_1) /* | BUTTON_PIN_BITMASK(WAKEUP_2
 
 Adafruit_SSD1306 oled(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 EncButton eb(ENC_L, ENC_R, ENC_BTN, INPUT_PULLUP);
-Button wndSensor(WND_SWITCH_PIN);
+Button hightEndstor(HIGHT_ENDSTOP_PIN, INPUT_PULLUP, HIGH);
+Button lowEndstor(LOW_ENDSTOP_PIN, INPUT_PULLUP, HIGH) ;
 GTimer displayIdleTimer(MS);
+GTimer animTimer(MS);
 OledMenu<MENU_ITEMS, Adafruit_SSD1306> menu(&oled);
 ServoSmooth servo;
 Preferences prefs;
 
 RTC_DATA_ATTR float cur_t = 24.8; // TODO: remove RTC_DATA_ATTR after attach DHT11 sensor
 float cur_h = 45.9;
-int rotateAnge = 0;
+
+byte rotateDirection = 1;
+byte animationPos = 0;
+
+
+#define ROTATE_UPWARD 500
+#define ROTATE_STOP 1500
+#define ROTATE_DOWNWARD 2500
 
 struct Settings {
   float lowTemp = 22;
   float highTemp = 25;
-  float turns = 1.2;
-  bool isInverted = false;
-  bool wndNormalClose = true;
   u_int checkPeriod = 20; //TODO: set to 60s for prod
 } cfg;
 
 RTC_DATA_ATTR bool oledEnabled = true;
-RTC_DATA_ATTR bool isWndOpened = true;
+RTC_DATA_ATTR bool isFullOpened = false;
+RTC_DATA_ATTR bool hightEndstopPressed = false;
+RTC_DATA_ATTR bool lowEndstopPressed = false;
+/**
+ *  0 - idle, no operations
+ *  1 - opening is in progress
+ *  2 - closing is in progress
+ */
+byte servoOperation = 0;
 bool isSleepWakeup = false;
 bool isButtonWakeup = false;
 
+
+byte batPers = 50;
 
 
 void initMenu();
@@ -91,10 +109,9 @@ void checkTemperature();
 bool isIdleState();
 void saveSettings();
 void resetSettings();
+void manualRunServo();
+void drawBattery(int16_t x, int16_t y, byte percent/* , byte scale = 1 */);
 
-#ifdef DEBUG_ENABLE
-void debug_applyServoAngel();
-#endif
 
 // Method to print the reason by which ESP32 has been awaken from sleep
 void define_wakeup_reason(){
@@ -157,14 +174,12 @@ void initMenu() {
   menu.addItem(PSTR("TEMPER. VIDKR."), GM_N_FLOAT(0.5), &cfg.highTemp, &cfg.lowTemp, GM_N_FLOAT(MAX_TEMP)); // 2
   menu.addItem(PSTR("TEMPER. ZAKR."), GM_N_FLOAT(0.5), &cfg.lowTemp, GM_N_FLOAT(MIN_TEMP), &cfg.highTemp);  // 3
   menu.addItem(PSTR("PERIOD (s)"),  GM_N_U_INT(10), &cfg.checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));    // 4
-  menu.addItem(PSTR("OBERTIV"), GM_N_FLOAT(0.01), &cfg.turns, GM_N_FLOAT(0.01), GM_N_FLOAT(10));            // 5
-  menu.addItem(PSTR("INVERTUVATY"), &cfg.isInverted);                                                       // 6
-  menu.addItem(PSTR("ROZM. PRY ZAKR"), &cfg.wndNormalClose);                                                // 7
-  menu.addItem(PSTR("RESET"));                                                                          // 8
-  menu.addItem(PSTR("<<< EXIT"));                                                                       // 9
+  menu.addItem(PSTR("RESET"));                                                                              // 5
+  menu.addItem(PSTR("<< POV >>"), GM_N_BYTE(1), &rotateDirection, GM_N_BYTE(0), GM_N_BYTE(2));              // 6 
+  menu.addItem(PSTR("<<< EXIT"));                                                                           // 7
   #ifdef DEBUG_ENABLE
-  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP)); // 10 // just for testing
-  menu.addItem(PSTR("-- SRV -- "), GM_N_INT(5), &rotateAnge, GM_N_INT(0), GM_N_INT(360)); // 11 // just for testing
+  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP));    // 8 // just for testing
+  menu.addItem(PSTR("-- BAT -- "), GM_N_BYTE(1), &batPers, GM_N_BYTE(0), GM_N_BYTE(100));    // 9 // just for testing
   #endif
 
   eb.attach(encoder_cb);
@@ -172,8 +187,8 @@ void initMenu() {
 
 void initServo() {
   servo.attach(SERVO_PIN);        // подключить
-  servo.setSpeed(40);    // ограничить скорость
-  servo.setAccel(0.1);   	  // установить ускорение (разгон и торможение)
+  // servo.setSpeed(40);    // ограничить скорость
+  // servo.setAccel(0.1);   	  // установить ускорение (разгон и торможение)
 }
 
 void toggleMainScreen(bool show) {
@@ -196,9 +211,6 @@ void resetSettings() {
   cfg.highTemp = def.highTemp;
   cfg.lowTemp = def.lowTemp;
   cfg.checkPeriod = def.checkPeriod;
-  cfg.turns = def.turns;
-  cfg.isInverted = def.isInverted;
-  cfg.wndNormalClose = def.wndNormalClose;
 
   saveSettings();
 }
@@ -239,27 +251,25 @@ void onMenuItemChange(const int index, const void* val, const byte valType) {
     
     if (index == 0) {
       openValve();
+      toggleMainScreen(true);
     } else if (index == 1) {
       closeValve();
+      toggleMainScreen(true);
     }  
-    else if (index == 8) {
+    else if (index == 5) {
       resetSettings();
-    }
-    else if (index == 9) {
+    }    
+    else if (index == 6) {
+      manualRunServo();
+    } 
+    else if (index == 7) {
       toggleMainScreen(true);
     }
-    #ifdef DEBUG_ENABLE
-    else if  (index == 9) {
-      checkTemperature();
-    }
-    #endif    
   } else {
     #ifdef DEBUG_ENABLE
-    if (index == 10) {
+    if (index == 7) {
       LOG("set manual new temp"); LOGN(cur_t);
-    } else if (index == 11) {
-      LOG("rotate servo ange:"); LOGN(rotateAnge);
-      debug_applyServoAngel();
+      checkTemperature();
     } else 
     #endif  
     saveSettings();
@@ -282,20 +292,43 @@ boolean onMenuItemPrintOverride(const int index, const void* val, const byte val
     oled.print(seconds);
     
     return true;
+  } 
+  
+  else if (index == 6) {
+    char label[10] = "";
+    if (rotateDirection == 0)  strcat(label,  " UP " );
+    else if (rotateDirection == 2) strcat(label,  "DOwN" );
+    else strcat(label,  " O " );
+
+    oled.print(label);
+    return true;
   }
   
   return false;
 }
 
 
+/**
+ * Draws battery with 12x8
+ */
+void drawBattery(int16_t x, int16_t y, byte percent/* ,  byte scale = 1 */) {
+  oled.drawRect(x, y + 2, 2, 4, WHITE); // пипка
+
+  oled.fillRect(x + 2, y, 12, 8, WHITE); // стенка
+  // oled.drawLine(x + 2, y + 2, x+3, y+6, WHITE);
+  oled.fillRect(x + 3, y+1, map(100 - batPers, 0, 100, 0, 10), 6, BLACK);
+}
+
+
 void renderMainScreen() {
-  LOGN("render main> enabled: "+ String(oledEnabled) + " menu is showing: " + String(menu.isMenuShowing));
-  LOGN("exit?: " + String(!oledEnabled || menu.isMenuShowing));
+  // LOGN("render main> enabled: "+ String(oledEnabled) + " menu is showing: " + String(menu.isMenuShowing));
+  // LOGN("exit?: " + String(!oledEnabled || menu.isMenuShowing));
   
+  if (!oledEnabled || menu.isMenuShowing) return;
+
   oled.clearDisplay();   
   oled.setTextWrap(false);
   
-  // if (!oledEnabled || menu.isMenuShowing) return;
 
 
   char hum_str[32];
@@ -312,15 +345,38 @@ void renderMainScreen() {
   oled.print(temp_str); oled.print(char(248)); oled.print("C");
 
   // #ifndef DEBUG_ENABLE
+  
   oled.setTextSize(2);
-  oled.setCursor(16, SCREEN_HEIGHT - 18);
-  oled.print(isWndOpened ? "VIDKR." : "ZAKR.");
-  // #else
-  // oled.setCursor(0, SCREEN_HEIGHT - 18);
-  // oled.setTextSize(1);
-  // oled.print("wakeup?: ");  oled.print(isSleepWakeup); oled.print(" boots: "); oled.println(bootCount);
-  // oled.print("by btn?: ");  oled.println(isButtonWakeup);
-  // #endif
+  oled.setCursor(4, SCREEN_HEIGHT - 18);
+  
+  if (servoOperation > 0) {
+    animationPos += 1;
+    if (animationPos >= 5) animationPos = 0;
+    oled.setTextSize(2);
+    switch (animationPos)
+    {
+      case 0: oled.print(servoOperation == 2 ? "    " : "    "); break;
+      case 1: oled.print(servoOperation == 2 ? "   <" : ">   "); break;
+      case 2: oled.print(servoOperation == 2 ? "  <-" : "->  "); break;
+      case 3: oled.print(servoOperation == 2 ? " <--" : "--> "); break;
+      case 4: oled.print(servoOperation == 2 ? "<---" : "--->"); break;
+      default: oled.print(servoOperation == 2 ? animationPos : animationPos); break;
+    }
+  } else {
+    oled.print(isFullOpened ? "VIDKR." : "ZAKR.");
+  }  
+
+  // draw battery
+  oled.setTextSize(1);
+  if (batPers < 20) {
+    oled.setCursor(SCREEN_WIDTH - 16-26-4, SCREEN_HEIGHT - 12); 
+    oled.print("!");
+  }
+
+  drawBattery(SCREEN_WIDTH - 16-24, SCREEN_HEIGHT - 12, batPers ); 
+  oled.setCursor(SCREEN_WIDTH - 24, SCREEN_HEIGHT - 12); // 
+  oled.print(batPers); oled.print("%");
+  
 
   oled.display();
 }
@@ -339,7 +395,7 @@ void idleDisplayTrigger(){
 
 void goToSleep() {
   #ifdef ENABLE_SLEEP
-  LOGN("Going to sleep now. Would wakeup after " + String(cfg.checkPeriod) + " seconds.");
+  LOG("Going to sleep now. Would wakeup after "); LOG(cfg.checkPeriod); LOGN(" seconds.");
   esp_deep_sleep_start();
   #endif
 }
@@ -351,13 +407,12 @@ void wakeDisplayTrigger() {
   }
 }
 
-
 bool isIdleState() {
-  return !oledEnabled;
+  return !oledEnabled && !servoOperation;
 }
 
 void checkTemperature() {
-  LOGN("display on: " + String(oledEnabled) + " opened: " + String(isWndOpened));
+  LOG("display on: "); LOG(oledEnabled);LOG(" opened: "); LOGN(isFullOpened);
   LOG("LOW: "); LOG(cfg.lowTemp); LOG(" CUR: "); LOG(cur_t); LOG(" HI: "); LOGN(cfg.highTemp);
   
   if (cur_t >= cfg.highTemp) {
@@ -370,56 +425,103 @@ void checkTemperature() {
 }
 
 void openValve() {
-  if (isWndOpened) {
+  if (servoOperation > 0) return; // action is already in progress;
+  if (isFullOpened) {
     LOGN(">>>> Value is opened already. Noting to do.");
     return;
   }
 
-  LOG("!!!! Open valve open with ");
-  LOG( (360 * cfg.turns) * (cfg.isInverted? -1 : 1) );
-  LOGN(" deg");
-  // isWndOpened = true;
-  // digitalWrite(LED_PIN, HIGH); 
+  LOG("!!!! Open valve with "); LOGN(ROTATE_UPWARD);
+
+  servoOperation = 1;
+  servo.writeMicroseconds(ROTATE_UPWARD);
+  delay(KICK_DELAY); // wait few secconds to release endststop switch
 }
 
 void closeValve() {
-  if (!isWndOpened) {
+  if (servoOperation > 0) return; // action is already in progress;
+  if (!isFullOpened) {
     LOGN("<<<< Value is closed already. Noting to do.");
     return;
   }
-  LOG("!!!! Close valve with ");
-  LOG( (360 * cfg.turns) * (cfg.isInverted? 1 : -1) );
-  LOGN(" deg");
-  // isWndOpened = false;
-  // digitalWrite(LED_PIN, LOW); 
+  LOG("!!!! Close valve with "); LOGN(ROTATE_DOWNWARD);
+  servoOperation = 2;
+  servo.writeMicroseconds(ROTATE_DOWNWARD);
+  delay(KICK_DELAY); // wait few secconds to release endststop switch
+  
 }
 
-void on_wnd_switch_change() {
-  bool state = digitalRead(WND_SWITCH_PIN);
-  LOG("on_wnd_switch_change: "); LOGN(state);
-  isWndOpened = cfg.wndNormalClose ? !state: state;
-  digitalWrite(LED_PIN, isWndOpened);
+
+void defineWndOpenState() {
+  bool _new = !lowEndstopPressed || !hightEndstopPressed;
+  if (_new == isFullOpened) return;
+  isFullOpened = _new;
+  LOG("is wnd opend: "); LOGN(isFullOpened);
+  digitalWrite(LED_PIN, !isFullOpened);
+  
   if (!menu.isMenuShowing) {
     renderMainScreen();
   }
 }
 
+void on_hight_endstop_change() {
+  bool state = digitalRead(HIGHT_ENDSTOP_PIN);
+  if (hightEndstopPressed == state) return;
+  hightEndstopPressed = state;
+  
+  LOG("on hight wnd_switch_change: "); LOGN(hightEndstopPressed);
+  defineWndOpenState();
+}
+
+void on_low_endstop_change() {
+  bool state = digitalRead(LOW_ENDSTOP_PIN);
+  if (lowEndstopPressed == state) return;
+  lowEndstopPressed = state;
+  
+  LOG("on low wnd_switch_change: "); LOGN(lowEndstopPressed);
+  defineWndOpenState();
+}
+
+void manualRunServo() {
+  switch (rotateDirection)
+  {
+  case 0:
+    // max forward rotate (open valve)
+    servo.writeMicroseconds(ROTATE_UPWARD);
+    break;
+  case 1: 
+    // no rotation
+    servo.writeMicroseconds(ROTATE_STOP);
+    break;
+  case 2: 
+    // max backward rotatie (close valve)
+    servo.writeMicroseconds(ROTATE_DOWNWARD);
+    break;
+  }
+  // servo.setCurrentDeg(rotateDirection);
+}
+
 void setup() {
   #ifdef DEBUG_ENABLE
   Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT); 
   delay(5000);
   #endif
 
   prefs.begin("0");
   prefs.getBytes("0", &cfg, sizeof(cfg));
+  
+  pinMode(HIGHT_ENDSTOP_PIN, INPUT_PULLUP);
+  pinMode(LOW_ENDSTOP_PIN, INPUT_PULLUP);
+  hightEndstor.setDebTimeout(255);
+  lowEndstor.setDebTimeout(255);
 
-  pinMode(LED_PIN, OUTPUT);  
-  pinMode(WND_SWITCH_PIN, INPUT_PULLUP);
-  wndSensor.attach(on_wnd_switch_change);
+  hightEndstor.attach(on_hight_endstop_change);
+  lowEndstor.attach(on_low_endstop_change);
   
   define_wakeup_reason();
-  LOGN("Is awaked from sleep?: " + String(isSleepWakeup));
-  LOGN("Is awaked by Btn?: " + String(isButtonWakeup));
+  LOG("Is awaked from sleep?: ");LOGN(isSleepWakeup);
+  LOG("Is awaked by Btn?: "); LOGN(isButtonWakeup);
 
   initDisplay();
   initMenu();
@@ -473,15 +575,31 @@ void setup() {
 void loop() {
   // LOGN("Loop tick");
   eb.tick();
-  servo.tick();
-  wndSensor.tick();
+  // servo.tick();
+  hightEndstor.tick();
+  lowEndstor.tick();
+  // animTimer.tick();
   if (displayIdleTimer.isReady()) idleDisplayTrigger();
-}
 
+  if (servoOperation > 0) {
+    LOG("rotation is in progress... operation: "); LOG(servoOperation == 1 ? "Opening ": "Closing "); 
+    LOG(" hight pressed: "); LOG(hightEndstopPressed); LOG(" low pressed: "); LOG(lowEndstopPressed); 
+    LOG(" full condition: "); LOGN(servoOperation == 1 && !hightEndstopPressed && !lowEndstopPressed);
+    if (!animTimer.isEnabled()) {
+      animTimer.setInterval(300);
+    }
 
-// --- debug func
-#ifdef DEBUG_ENABLE
-void debug_applyServoAngel() {
-  servo.setCurrentDeg(rotateAnge);
+    if (animTimer.isReady()) 
+      renderMainScreen();
+    
+    if (
+      (servoOperation == 1 && !hightEndstopPressed && !lowEndstopPressed) || // for opening trigger stop when both endstops is released
+      (servoOperation == 2 && hightEndstopPressed && lowEndstopPressed) // for closing trigger stop when both endstops is pressed
+    ) {
+      servo.writeMicroseconds(ROTATE_STOP);
+      servoOperation = 0;
+      animTimer.reset();
+      renderMainScreen();
+    }
+  }
 }
-#endif
