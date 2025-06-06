@@ -9,6 +9,7 @@
 #include <ServoSmooth.h>
 #include "GOledMenuAda.h"
 #include "driver/rtc_io.h"
+#include "DHT.h"
 
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
@@ -25,9 +26,11 @@
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3C //0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 
-#define ENC_L GPIO_NUM_1
-#define ENC_R GPIO_NUM_2
-#define ENC_BTN GPIO_NUM_3
+#define ENC_BTN GPIO_NUM_1
+#define ENC_L GPIO_NUM_2
+#define ENC_R GPIO_NUM_3
+
+#define DHT_PIN GPIO_NUM_5
 
 #define LED_PIN GPIO_NUM_8
 #define HIGHT_ENDSTOP_PIN GPIO_NUM_4
@@ -54,9 +57,11 @@ Button hightEndstor(HIGHT_ENDSTOP_PIN, INPUT_PULLUP, HIGH);
 Button lowEndstor(LOW_ENDSTOP_PIN, INPUT_PULLUP, HIGH) ;
 GTimer displayIdleTimer(MS);
 GTimer animTimer(MS);
+GTimer temperatureTimer(MS);
 OledMenu<MENU_ITEMS, Adafruit_SSD1306> menu(&oled);
 ServoSmooth servo;
 Preferences prefs;
+DHT dht(DHT_PIN, DHT11);
 
 RTC_DATA_ATTR float cur_t = 24.8; // TODO: remove RTC_DATA_ATTR after attach DHT11 sensor
 float cur_h = 45.9;
@@ -106,6 +111,7 @@ void idleDisplayTrigger();
 void wakeDisplayTrigger();
 void goToSleep();
 void checkTemperature();
+void readTemperature();
 bool isIdleState();
 void saveSettings();
 void resetSettings();
@@ -153,6 +159,7 @@ void initDisplay() {
   // u8g2_for_adafruit_gfx.begin(oled);
   // u8g2_for_adafruit_gfx.setFont(u8g2_font_4x6_t_cyrillic);  // icon font
 
+  oled.setRotation(2); // rotate 180deg
   // do not show Adafruit logo
   oled.clearDisplay();
   oled.drawPixel(0, 0, SSD1306_WHITE);
@@ -411,7 +418,35 @@ bool isIdleState() {
   return !oledEnabled && !servoOperation;
 }
 
+void readTemperature() {
+  // Reading temperature or humidity takes about 250 milliseconds!
+  // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+  float h = dht.readHumidity();
+  // Read temperature as Celsius (the default)
+  float t = dht.readTemperature();
+  
+
+  // Check if any reads failed and exit early (to try again).
+  if (isnan(h) || isnan(t)) {
+    LOGN(F("Failed to read from DHT sensor!"));
+    return;
+  }
+   
+  // Compute heat index in Celsius (isFahreheit = false)
+  // float hic = dht.computeHeatIndex(t, h, false);
+  cur_h = h;
+  cur_t = t;
+
+  LOG(F("Humidity: ")); LOGN(h);
+  LOG(F("Temperature: ")); LOG(t);
+
+  renderMainScreen();
+}
+
 void checkTemperature() {
+
+
+
   LOG("display on: "); LOG(oledEnabled);LOG(" opened: "); LOGN(isFullOpened);
   LOG("LOW: "); LOG(cfg.lowTemp); LOG(" CUR: "); LOG(cur_t); LOG(" HI: "); LOGN(cfg.highTemp);
   
@@ -526,13 +561,16 @@ void setup() {
   initDisplay();
   initMenu();
   initServo();
+  dht.begin();
+
+  temperatureTimer.setInterval(cfg.checkPeriod * 1000);
 
   if (isButtonWakeup || !isSleepWakeup) {
     wakeDisplayTrigger();
     toggleMainScreen(true);
     displayIdleTimer.setTimeout(DISPLAY_TIMEOUT); 
   }
-
+  readTemperature();
   renderMainScreen();
 
 
@@ -580,6 +618,7 @@ void loop() {
   lowEndstor.tick();
   // animTimer.tick();
   if (displayIdleTimer.isReady()) idleDisplayTrigger();
+  if (temperatureTimer.isReady()) readTemperature();
 
   if (servoOperation > 0) {
     LOG("rotation is in progress... operation: "); LOG(servoOperation == 1 ? "Opening ": "Closing "); 
