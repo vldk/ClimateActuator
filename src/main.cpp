@@ -10,15 +10,17 @@
 #include "GOledMenuAda.h"
 #include "driver/rtc_io.h"
 #include "DHT.h"
+#include <Adafruit_INA219.h>
+
 
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
 #define LOGN(x) Serial.println(x)
-#define MENU_ITEMS 10
+#define MENU_ITEMS 11
 #else
 #define LOG(x)
 #define LOGN(x)
-#define MENU_ITEMS 8
+#define MENU_ITEMS 9
 #endif
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
@@ -41,6 +43,7 @@
 #define MAX_TEMP 50.0
 #define MIN_TEMP 10.0
 #define KICK_DELAY 1000 // freeze for 1 sec during rotation start
+#define LION_BATTERIES_COUNT 2
 
 
 #define BUTTON_PIN_BITMASK(GPIO) (1ULL << GPIO)  // 2 ^ GPIO_NUMBER in hex
@@ -62,6 +65,8 @@ OledMenu<MENU_ITEMS, Adafruit_SSD1306> menu(&oled);
 ServoSmooth servo;
 Preferences prefs;
 DHT dht(DHT_PIN, DHT11);
+Adafruit_INA219 ina219;
+
 
 RTC_DATA_ATTR float cur_t = 24.8; // TODO: remove RTC_DATA_ATTR after attach DHT11 sensor
 float cur_h = 45.9;
@@ -78,6 +83,7 @@ struct Settings {
   float lowTemp = 22;
   float highTemp = 25;
   u_int checkPeriod = 20; //TODO: set to 60s for prod
+  bool is12vPow = false;
 } cfg;
 
 RTC_DATA_ATTR bool oledEnabled = true;
@@ -112,6 +118,7 @@ void wakeDisplayTrigger();
 void goToSleep();
 void checkTemperature();
 void readTemperature();
+void readBattery();
 bool isIdleState();
 void saveSettings();
 void resetSettings();
@@ -181,12 +188,13 @@ void initMenu() {
   menu.addItem(PSTR("TEMPER. VIDKR."), GM_N_FLOAT(0.5), &cfg.highTemp, &cfg.lowTemp, GM_N_FLOAT(MAX_TEMP)); // 2
   menu.addItem(PSTR("TEMPER. ZAKR."), GM_N_FLOAT(0.5), &cfg.lowTemp, GM_N_FLOAT(MIN_TEMP), &cfg.highTemp);  // 3
   menu.addItem(PSTR("PERIOD (s)"),  GM_N_U_INT(10), &cfg.checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));    // 4
-  menu.addItem(PSTR("RESET"));                                                                              // 5
-  menu.addItem(PSTR("<< POV >>"), GM_N_BYTE(1), &rotateDirection, GM_N_BYTE(0), GM_N_BYTE(2));              // 6 
-  menu.addItem(PSTR("<<< EXIT"));                                                                           // 7
+  menu.addItem(PSTR("12V ? "),   &cfg.is12vPow);                                                            // 5
+  menu.addItem(PSTR("RESET"));                                                                              // 6
+  menu.addItem(PSTR("<< M >>"), GM_N_BYTE(1), &rotateDirection, GM_N_BYTE(0), GM_N_BYTE(2));                // 7 
+  menu.addItem(PSTR("<<< EXIT"));                                                                           // 8
   #ifdef DEBUG_ENABLE
-  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP));    // 8 // just for testing
-  menu.addItem(PSTR("-- BAT -- "), GM_N_BYTE(1), &batPers, GM_N_BYTE(0), GM_N_BYTE(100));    // 9 // just for testing
+  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP));    // 9 // just for testing
+  menu.addItem(PSTR("-- BAT -- "), GM_N_BYTE(1), &batPers, GM_N_BYTE(0), GM_N_BYTE(100));    // 10 // just for testing
   #endif
 
   eb.attach(encoder_cb);
@@ -218,6 +226,7 @@ void resetSettings() {
   cfg.highTemp = def.highTemp;
   cfg.lowTemp = def.lowTemp;
   cfg.checkPeriod = def.checkPeriod;
+  cfg.is12vPow = def.is12vPow;
 
   saveSettings();
 }
@@ -263,18 +272,18 @@ void onMenuItemChange(const int index, const void* val, const byte valType) {
       closeValve();
       toggleMainScreen(true);
     }  
-    else if (index == 5) {
+    else if (index == 6) {
       resetSettings();
     }    
-    else if (index == 6) {
+    else if (index == 7) {
       manualRunServo();
     } 
-    else if (index == 7) {
+    else if (index == 8) {
       toggleMainScreen(true);
     }
   } else {
     #ifdef DEBUG_ENABLE
-    if (index == 7) {
+    if (index == 9) {
       LOG("set manual new temp"); LOGN(cur_t);
       checkTemperature();
     } else 
@@ -301,7 +310,7 @@ boolean onMenuItemPrintOverride(const int index, const void* val, const byte val
     return true;
   } 
   
-  else if (index == 6) {
+  else if (index == 7) {
     char label[10] = "";
     if (rotateDirection == 0)  strcat(label,  " UP " );
     else if (rotateDirection == 2) strcat(label,  "DOwN" );
@@ -373,6 +382,8 @@ void renderMainScreen() {
     oled.print(isFullOpened ? "VIDKR." : "ZAKR.");
   }  
 
+
+  readBattery();
   // draw battery
   oled.setTextSize(1);
   if (batPers < 20) {
@@ -419,6 +430,7 @@ bool isIdleState() {
 }
 
 void readTemperature() {
+
   // Reading temperature or humidity takes about 250 milliseconds!
   // Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
   float h = dht.readHumidity();
@@ -443,9 +455,35 @@ void readTemperature() {
   renderMainScreen();
 }
 
+void readBattery() {
+  float shuntvoltage = 0;
+  float busvoltage = 0;
+  float current_mA = 0;
+  float loadvoltage = 0;
+  float power_mW = 0;
+
+  shuntvoltage = ina219.getShuntVoltage_mV();
+  busvoltage = ina219.getBusVoltage_V();
+  current_mA = ina219.getCurrent_mA();
+  power_mW = ina219.getPower_mW();
+  loadvoltage = busvoltage + (shuntvoltage / 1000);
+
+  float minV = cfg.is12vPow? 11.8 : (float)3.2 * LION_BATTERIES_COUNT; 
+  float maxV = cfg.is12vPow? 12.6 : (float)4.2 * LION_BATTERIES_COUNT;
+  
+  batPers = map(loadvoltage, minV, maxV, 0, 100);
+
+  LOGN("----");
+  LOG("Bus Voltage:   "); LOG(busvoltage); LOGN(" V");
+  LOG("Shunt Voltage: "); LOG(shuntvoltage); LOGN(" mV");
+  LOG("Load Voltage:  "); LOG(loadvoltage); LOGN(" V");
+  LOG("Current:       "); LOG(current_mA); LOGN(" mA");
+  LOG("Power:         "); LOG(power_mW); LOGN(" mW");
+  LOG("percents :     "); LOG(batPers); LOGN(" %");
+  LOGN("----");
+}
+
 void checkTemperature() {
-
-
 
   LOG("display on: "); LOG(oledEnabled);LOG(" opened: "); LOGN(isFullOpened);
   LOG("LOW: "); LOG(cfg.lowTemp); LOG(" CUR: "); LOG(cur_t); LOG(" HI: "); LOGN(cfg.highTemp);
@@ -561,15 +599,23 @@ void setup() {
   initDisplay();
   initMenu();
   initServo();
+
+  if ( !ina219.begin()) {
+    LOGN("Failed to find INA219 chip");
+  }
+
   dht.begin();
 
+  #ifndef ENABLE_SLEEP
   temperatureTimer.setInterval(cfg.checkPeriod * 1000);
+  #endif
 
   if (isButtonWakeup || !isSleepWakeup) {
     wakeDisplayTrigger();
     toggleMainScreen(true);
     displayIdleTimer.setTimeout(DISPLAY_TIMEOUT); 
   }
+  
   readTemperature();
   renderMainScreen();
 
@@ -618,7 +664,10 @@ void loop() {
   lowEndstor.tick();
   // animTimer.tick();
   if (displayIdleTimer.isReady()) idleDisplayTrigger();
+  
+  #ifndef ENABLE_SLEEP
   if (temperatureTimer.isReady()) readTemperature();
+  #endif
 
   if (servoOperation > 0) {
     LOG("rotation is in progress... operation: "); LOG(servoOperation == 1 ? "Opening ": "Closing "); 
