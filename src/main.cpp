@@ -17,10 +17,12 @@
 #define LOG(x) Serial.print(x)
 #define LOGN(x) Serial.println(x)
 #define MENU_ITEMS 11
+// #define DISPLAY_TIMEOUT 120000
 #else
 #define LOG(x)
 #define LOGN(x)
 #define MENU_ITEMS 9
+// #define DISPLAY_TIMEOUT 10000 // 10sec
 #endif
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
@@ -39,7 +41,6 @@
 #define LOW_ENDSTOP_PIN GPIO_NUM_21
 #define SERVO_PIN GPIO_NUM_10
 #define uS_TO_S_FACTOR 1000000ULL /* Conversion factor for micro seconds to seconds */
-#define DISPLAY_TIMEOUT 120000 //5000 // 5sec
 #define MAX_TEMP 50.0
 #define MIN_TEMP 10.0
 #define KICK_DELAY 1000 // freeze for 1 sec during rotation start
@@ -83,7 +84,7 @@ struct Settings {
   float lowTemp = 22;
   float highTemp = 25;
   u_int checkPeriod = 20; //TODO: set to 60s for prod
-  bool is12vPow = false;
+  u_int displayTimeout = 10; // 10 sec
 } cfg;
 
 RTC_DATA_ATTR bool oledEnabled = true;
@@ -100,7 +101,8 @@ bool isSleepWakeup = false;
 bool isButtonWakeup = false;
 
 
-byte batPers = 50;
+byte batPers = 0;
+float batVoltage = 0;
 
 
 void initMenu();
@@ -125,6 +127,10 @@ void resetSettings();
 void manualRunServo();
 void drawBattery(int16_t x, int16_t y, byte percent/* , byte scale = 1 */);
 
+float mapfloat(float x, float in_min, float in_max, float out_min, float out_max)
+{
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
 
 // Method to print the reason by which ESP32 has been awaken from sleep
 void define_wakeup_reason(){
@@ -188,7 +194,7 @@ void initMenu() {
   menu.addItem(PSTR("TEMPER. VIDKR."), GM_N_FLOAT(0.5), &cfg.highTemp, &cfg.lowTemp, GM_N_FLOAT(MAX_TEMP)); // 2
   menu.addItem(PSTR("TEMPER. ZAKR."), GM_N_FLOAT(0.5), &cfg.lowTemp, GM_N_FLOAT(MIN_TEMP), &cfg.highTemp);  // 3
   menu.addItem(PSTR("PERIOD (s)"),  GM_N_U_INT(10), &cfg.checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));    // 4
-  menu.addItem(PSTR("12V ? "),   &cfg.is12vPow);                                                            // 5
+  menu.addItem(PSTR("EKRAN T. (s)"), GM_N_U_INT(1) , &cfg.displayTimeout, GM_N_U_INT(2), &cfg.checkPeriod);  // 5
   menu.addItem(PSTR("RESET"));                                                                              // 6
   menu.addItem(PSTR("<< M >>"), GM_N_BYTE(1), &rotateDirection, GM_N_BYTE(0), GM_N_BYTE(2));                // 7 
   menu.addItem(PSTR("<<< EXIT"));                                                                           // 8
@@ -226,7 +232,7 @@ void resetSettings() {
   cfg.highTemp = def.highTemp;
   cfg.lowTemp = def.lowTemp;
   cfg.checkPeriod = def.checkPeriod;
-  cfg.is12vPow = def.is12vPow;
+  cfg.displayTimeout = def.displayTimeout;
 
   saveSettings();
 }
@@ -239,9 +245,9 @@ void encoder_cb() {
 
       if (menu.isMenuShowing) {
         if (eb.dir() == 1) {
-          menu.selectNext(eb.fast());
+          menu.selectPrev(eb.fast());
         } else {
-          menu.selectPrev(eb.fast());          
+          menu.selectNext(eb.fast());
         }
       }
       wakeDisplayTrigger();
@@ -258,7 +264,7 @@ void encoder_cb() {
   }
 
   displayIdleTimer.reset();
-  displayIdleTimer.setTimeout(DISPLAY_TIMEOUT);
+  displayIdleTimer.setTimeout(cfg.displayTimeout * 1000);
 }
 
 void onMenuItemChange(const int index, const void* val, const byte valType) {
@@ -308,7 +314,22 @@ boolean onMenuItemPrintOverride(const int index, const void* val, const byte val
     oled.print(seconds);
     
     return true;
-  } 
+  } else if (index == 5) {
+    unsigned int minutes = cfg.displayTimeout / 60; // [mm]
+    byte seconds = cfg.displayTimeout - (minutes * 60); // [ss]
+    if (minutes < 10) {
+      oled.print(0);
+    }
+    oled.print(minutes);
+    oled.print(":");
+    
+    if (seconds < 10) {
+      oled.print(0);
+    }
+    oled.print(seconds);
+    
+    return true;
+  }
   
   else if (index == 7) {
     char label[10] = "";
@@ -386,6 +407,12 @@ void renderMainScreen() {
   readBattery();
   // draw battery
   oled.setTextSize(1);
+
+  oled.setCursor(SCREEN_WIDTH - 16-26, SCREEN_HEIGHT - 23); 
+  char voltage_str[32];
+  snprintf(voltage_str, sizeof(voltage_str), "%.1f%V", batVoltage);
+  oled.printf(voltage_str);
+
   if (batPers < 20) {
     oled.setCursor(SCREEN_WIDTH - 16-26-4, SCREEN_HEIGHT - 12); 
     oled.print("!");
@@ -468,10 +495,18 @@ void readBattery() {
   power_mW = ina219.getPower_mW();
   loadvoltage = busvoltage + (shuntvoltage / 1000);
 
-  float minV = cfg.is12vPow? 11.8 : (float)3.2 * LION_BATTERIES_COUNT; 
-  float maxV = cfg.is12vPow? 12.6 : (float)4.2 * LION_BATTERIES_COUNT;
+  bool is12vPow = loadvoltage > 4.2 * LION_BATTERIES_COUNT;  
+
+  float minV = is12vPow ? 10.8 : (float)3.2 * LION_BATTERIES_COUNT; 
+  float maxV = is12vPow ? 12.6 : (float)4.2 * LION_BATTERIES_COUNT;
   
-  batPers = map(loadvoltage, minV, maxV, 0, 100);
+  LOGN("vMin:"); LOG(minV); LOG(" maxV:"); LOGN(maxV);
+  batPers = mapfloat(loadvoltage, minV, maxV, 0, 100);
+
+  if (batPers > 100 ) batPers = 100;
+  if (batPers < 0 ) batPers = 0;
+
+  batVoltage = loadvoltage;
 
   LOGN("----");
   LOG("Bus Voltage:   "); LOG(busvoltage); LOGN(" V");
@@ -530,7 +565,9 @@ void defineWndOpenState() {
   if (_new == isFullOpened) return;
   isFullOpened = _new;
   LOG("is wnd opend: "); LOGN(isFullOpened);
+  #ifdef DEBUG_ENABLE
   digitalWrite(LED_PIN, !isFullOpened);
+  #endif
   
   if (!menu.isMenuShowing) {
     renderMainScreen();
@@ -613,7 +650,7 @@ void setup() {
   if (isButtonWakeup || !isSleepWakeup) {
     wakeDisplayTrigger();
     toggleMainScreen(true);
-    displayIdleTimer.setTimeout(DISPLAY_TIMEOUT); 
+    displayIdleTimer.setTimeout(cfg.displayTimeout * 1000); 
   }
   
   readTemperature();
