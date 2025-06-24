@@ -16,7 +16,7 @@
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
 #define LOGN(x) Serial.println(x)
-#define MENU_ITEMS 12
+#define MENU_ITEMS 10
 // #define DISPLAY_TIMEOUT 120000
 #else
 #define LOG(x)
@@ -69,8 +69,9 @@ DHT dht(DHT_PIN, DHT11);
 Adafruit_INA219 ina219;
 
 
-RTC_DATA_ATTR float cur_t = 24.8; // TODO: remove RTC_DATA_ATTR after attach DHT11 sensor
-float cur_h = 45.9;
+RTC_DATA_ATTR uint bootCounts=0;
+float cur_t = 0;
+float cur_h = 0;
 
 byte rotateDirection = 1; // no rotation
 byte animationPos = 0;
@@ -89,8 +90,8 @@ struct Settings {
 } cfg;
 
 RTC_DATA_ATTR bool oledEnabled = true;
-RTC_DATA_ATTR bool hightEndstopPressed = false;
-RTC_DATA_ATTR bool lowEndstopPressed = false;
+// RTC_DATA_ATTR bool hightEndstopPressed = false;
+// RTC_DATA_ATTR bool lowEndstopPressed = false;
 
 bool isFullOpened = false;
 bool isPartiallyOpened = false;
@@ -185,7 +186,8 @@ void initDisplay() {
   
   // oled.setTextSize(1);             // Normal 1:1 pixel scale
   oled.setTextColor(SSD1306_WHITE);        // Draw white text  
-  oled.print(millis());
+  oled.println(bootCounts);
+  oled.println(cur_t);
   oled.display();
   // sleep(100);
   // oled.clearDisplay();
@@ -208,8 +210,8 @@ void initMenu() {
   menu.addItem(PSTR("<- M ->"), GM_N_BYTE(1), &rotateDirection, GM_N_BYTE(0), GM_N_BYTE(2));                // 8 
   menu.addItem(PSTR("<<< EXIT"));                                                                           // 9
   #ifdef DEBUG_ENABLE
-  menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP));    // 10 // just for testing
-  menu.addItem(PSTR("-- BAT -- "), GM_N_BYTE(1), &batPers, GM_N_BYTE(0), GM_N_BYTE(100));                   // 11 // just for testing
+  // menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP));    // 10 // just for testing
+  // menu.addItem(PSTR("-- BAT -- "), GM_N_BYTE(1), &batPers, GM_N_BYTE(0), GM_N_BYTE(100));                   // 11 // just for testing
   #endif
 
   eb.attach(encoder_cb);
@@ -397,6 +399,8 @@ void renderMainScreen() {
   oled.setTextSize(2);
   oled.setCursor(4, SCREEN_HEIGHT - 18);
   
+  defineWndOpenState();
+
   if (servoOperation > 0) {
     animationPos += 1;
     if (animationPos >= 5) animationPos = 0;
@@ -549,9 +553,10 @@ void checkTemperature() {
 }
 
 void openValve() {
+  LOG("onOpen: servOp: "); LOG(servoOperation); LOG(" isFullOpened: "); LOG(isFullOpened); LOG(" isPartOpened: "); LOGN(isPartiallyOpened);
   if (servoOperation > 0) return; // action is already in progress;
   if (isFullOpened) {
-    if (isPartiallyOpened) {      
+    if (!isPartiallyOpened) {      
       LOGN(">>>> Value is opened already. Noting to do.");
       return;
     } // else need to open fully
@@ -565,6 +570,7 @@ void openValve() {
 }
 
 void closeValve() {
+  LOG("onClose: servOp: "); LOG(servoOperation); LOG(" isFullOpened: "); LOG(isFullOpened); LOG(" isPartOpened: "); LOGN(isPartiallyOpened);
   if (servoOperation > 0) return; // action is already in progress;
   if (!isFullOpened) {
     if (!isPartiallyOpened) {
@@ -581,40 +587,40 @@ void closeValve() {
 
 
 void defineWndOpenState() {
+  bool lowEndstopPressed = digitalRead(LOW_ENDSTOP_PIN);
+  bool hightEndstopPressed = digitalRead(HIGHT_ENDSTOP_PIN);
+
   isPartiallyOpened = !lowEndstopPressed && hightEndstopPressed;
   LOG("is wnd partially opend: "); LOGN(isPartiallyOpened);
   bool _new = !lowEndstopPressed && !hightEndstopPressed;
   if (_new == isFullOpened) return;
   isFullOpened = _new;
-  LOG("is wnd opend: "); LOGN(isFullOpened);
-  #ifdef DEBUG_ENABLE
-  digitalWrite(LED_PIN, !isFullOpened);
-  #endif
+  LOG("is wnd opend: "); LOGN(isFullOpened);  
   
-  if (!menu.isMenuShowing) {
-    renderMainScreen();
-  }
+  // if (!menu.isMenuShowing) {
+  //   renderMainScreen();
+  // }
 }
 
-void on_hight_endstop_change() {
-  bool state = digitalRead(HIGHT_ENDSTOP_PIN);
-  LOG("on hight wnd_switch hangler: "); LOG(state); LOG(" current: "); LOGN(hightEndstopPressed);
-  if (hightEndstopPressed == state) return;
-  hightEndstopPressed = state;
+// void on_hight_endstop_change() {
+//   bool state = digitalRead(HIGHT_ENDSTOP_PIN);
+//   LOG("on hight wnd_switch hangler: "); LOG(state); LOG(" current: "); LOGN(hightEndstopPressed);
+//   if (hightEndstopPressed == state) return;
+//   hightEndstopPressed = state;
   
-  LOG("on hight wnd_switch_change: "); LOGN(hightEndstopPressed);
-  defineWndOpenState();
-}
+//   LOG("on hight wnd_switch_change: "); LOGN(hightEndstopPressed);
+//   defineWndOpenState();
+// }
 
-void on_low_endstop_change() {
-  bool state = digitalRead(LOW_ENDSTOP_PIN);
-  LOG("on low wnd_switch hangler: "); LOG(state); LOG(" current: "); LOGN(lowEndstopPressed);
-  if (lowEndstopPressed == state) return;
-  lowEndstopPressed = state;
+// void on_low_endstop_change() {
+//   bool state = digitalRead(LOW_ENDSTOP_PIN);
+//   LOG("on low wnd_switch hangler: "); LOG(state); LOG(" current: "); LOGN(lowEndstopPressed);
+//   if (lowEndstopPressed == state) return;
+//   lowEndstopPressed = state;
   
-  LOG("on low wnd_switch_change: "); LOGN(lowEndstopPressed);
-  defineWndOpenState();
-}
+//   LOG("on low wnd_switch_change: "); LOGN(lowEndstopPressed);
+//   defineWndOpenState();
+// }
 
 void manualRunServo() {
   LOG("Manual rotate: "); LOGN(rotateDirection);
@@ -639,10 +645,11 @@ void manualRunServo() {
 void setup() {
   #ifdef DEBUG_ENABLE
   Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT); 
+  // pinMode(LED_PIN, OUTPUT); 
   // delay(5000);
   #endif
 
+  ++bootCounts;
   prefs.begin("0");
   prefs.getBytes("0", &cfg, sizeof(cfg));
   
@@ -651,8 +658,8 @@ void setup() {
   // hightEndstor.setDebTimeout(255);
   // lowEndstor.setDebTimeout(255);
 
-  attachInterrupt(HIGHT_ENDSTOP_PIN, on_hight_endstop_change, CHANGE);
-  attachInterrupt(LOW_ENDSTOP_PIN, on_low_endstop_change, CHANGE);
+  // attachInterrupt(HIGHT_ENDSTOP_PIN, on_hight_endstop_change, CHANGE);
+  // attachInterrupt(LOW_ENDSTOP_PIN, on_low_endstop_change, CHANGE);
   // hightEndstor.attach(on_hight_endstop_change);
   // lowEndstor.attach(on_low_endstop_change);
   
@@ -660,6 +667,10 @@ void setup() {
   LOG("Is awaked from sleep?: ");LOGN(isSleepWakeup);
   LOG("Is awaked by Btn?: "); LOGN(isButtonWakeup);
 
+  
+  dht.begin();
+
+  readTemperature();
   initDisplay();
   initMenu();
   initServo();
@@ -668,7 +679,6 @@ void setup() {
     LOGN("Failed to find INA219 chip");
   }
 
-  dht.begin();
 
   #ifndef ENABLE_SLEEP
   temperatureTimer.setInterval(cfg.checkPeriod * 1000);
@@ -681,7 +691,7 @@ void setup() {
   }
   
   defineWndOpenState();
-  readTemperature();
+  // readTemperature();
   renderMainScreen();
 
 
@@ -718,7 +728,7 @@ void setup() {
 
   eb.tick();
   checkTemperature();
-  
+
 }
 
 void loop() {
@@ -736,6 +746,9 @@ void loop() {
 
   if (servoOperation > 0) {
     displayIdleTimer.reset();
+    bool lowEndstopPressed = digitalRead(LOW_ENDSTOP_PIN);
+    bool hightEndstopPressed = digitalRead(HIGHT_ENDSTOP_PIN);
+    
     LOG("rotation is in progress... operation: "); LOG(servoOperation == 1 ? "Opening ": "Closing "); 
     LOG(" hight pressed: "); LOG(hightEndstopPressed); LOG(" low pressed: "); LOG(lowEndstopPressed); 
     LOG(" full condition: "); LOGN(servoOperation == 1 && !hightEndstopPressed && !lowEndstopPressed);
@@ -754,6 +767,11 @@ void loop() {
       servoOperation = 0;
       animTimer.reset();
       renderMainScreen();
+      defineWndOpenState();
+      checkTemperature();
+      // or 
+      // displayIdleTimer.reset();
+      // displayIdleTimer.setTimeout(cfg.displayTimeout * 1000);
     }
   }
 }
