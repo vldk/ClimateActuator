@@ -13,18 +13,16 @@
 #include <Adafruit_INA219.h>
 
 
+
 #ifdef DEBUG_ENABLE
 #define LOG(x) Serial.print(x)
 #define LOGN(x) Serial.println(x)
-#define MENU_ITEMS 10
-// #define DISPLAY_TIMEOUT 120000
 #else
 #define LOG(x)
 #define LOGN(x)
-#define MENU_ITEMS 10
-// #define DISPLAY_TIMEOUT 10000 // 10sec
 #endif
 
+#define MENU_ITEMS 12
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
@@ -69,7 +67,6 @@ DHT dht(DHT_PIN, DHT11);
 Adafruit_INA219 ina219;
 
 
-RTC_DATA_ATTR uint bootCounts=0;
 float cur_t = 0;
 float cur_h = 0;
 
@@ -87,9 +84,13 @@ struct Settings {
   float tempCorrection = -1.5;
   u_int checkPeriod = 20; //TODO: set to 60s for prod
   u_int displayTimeout = 10; // 10 sec
+  bool flip = false;
 } cfg;
 
+RTC_DATA_ATTR uint openCloseCounts=0;
 RTC_DATA_ATTR bool oledEnabled = true;
+RTC_DATA_ATTR bool forceStop = false;
+
 // RTC_DATA_ATTR bool hightEndstopPressed = false;
 // RTC_DATA_ATTR bool lowEndstopPressed = false;
 
@@ -120,6 +121,7 @@ bool onMenuItemPrintOverride(const int index, const void* val, const byte valTyp
 void encoder_cb();
 void openValve();
 void closeValve();
+void stopValveAction();
 void idleDisplayTrigger();
 void wakeDisplayTrigger();
 void goToSleep();
@@ -178,17 +180,24 @@ void initDisplay() {
   // u8g2_for_adafruit_gfx.begin(oled);
   // u8g2_for_adafruit_gfx.setFont(u8g2_font_4x6_t_cyrillic);  // icon font
 
-  oled.setRotation(2); // rotate 180deg
+  if (!cfg.flip) {
+    oled.setRotation(2); // rotate 180deg
+  }
+  
   // do not show Adafruit logo
   oled.clearDisplay();
   oled.drawPixel(0, 0, SSD1306_WHITE);
-  oled.cp437(true);
-  
-  // oled.setTextSize(1);             // Normal 1:1 pixel scale
+  oled.cp437(true);  
+  oled.setTextSize(1);             // Normal 1:1 pixel scale
   oled.setTextColor(SSD1306_WHITE);        // Draw white text  
-  oled.println(bootCounts);
+
+  #ifdef DEBUG_ENABLE
+  oled.println(openCloseCounts);
   oled.println(cur_t);
+  oled.print(isFullOpened); oled.print(" | "); oled.println( isPartiallyOpened);
+  #endif
   oled.display();
+  
   // sleep(100);
   // oled.clearDisplay();
   // oled.display();
@@ -201,18 +210,16 @@ void initMenu() {
   
   menu.addItem(PSTR("VIDKR."));                                                                             // 0
   menu.addItem(PSTR("ZAKR."));                                                                              // 1
-  menu.addItem(PSTR("TEMPER. VIDKR."), GM_N_FLOAT(0.5), &cfg.highTemp, &cfg.lowTemp, GM_N_FLOAT(MAX_TEMP)); // 2
-  menu.addItem(PSTR("TEMPER. ZAKR."), GM_N_FLOAT(0.5), &cfg.lowTemp, GM_N_FLOAT(MIN_TEMP), &cfg.highTemp);  // 3
-  menu.addItem(PSTR("PERIOD (s)"),  GM_N_U_INT(10), &cfg.checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));    // 4
-  menu.addItem(PSTR("EKRAN T. (s)"), GM_N_U_INT(1) , &cfg.displayTimeout, GM_N_U_INT(2), &cfg.checkPeriod); // 5
-  menu.addItem(PSTR("TEMP.CORR. (C)"), GM_N_FLOAT(0.5) , &cfg.tempCorrection, GM_N_FLOAT(-10), GM_N_FLOAT(10));// 6
-  menu.addItem(PSTR("RESET"));                                                                              // 7
-  menu.addItem(PSTR("<- M ->"), GM_N_BYTE(1), &rotateDirection, GM_N_BYTE(0), GM_N_BYTE(2));                // 8 
-  menu.addItem(PSTR("<<< EXIT"));                                                                           // 9
-  #ifdef DEBUG_ENABLE
-  // menu.addItem(PSTR("-- SET -- "), GM_N_FLOAT(0.1), &cur_t, GM_N_FLOAT(MIN_TEMP), GM_N_FLOAT(MAX_TEMP));    // 10 // just for testing
-  // menu.addItem(PSTR("-- BAT -- "), GM_N_BYTE(1), &batPers, GM_N_BYTE(0), GM_N_BYTE(100));                   // 11 // just for testing
-  #endif
+  menu.addItem(PSTR("STOP!"));                                                                              // 2
+  menu.addItem(PSTR("TEMPER. VIDKR."), GM_N_FLOAT(0.5), &cfg.highTemp, &cfg.lowTemp, GM_N_FLOAT(MAX_TEMP)); // 3
+  menu.addItem(PSTR("TEMPER. ZAKR."), GM_N_FLOAT(0.5), &cfg.lowTemp, GM_N_FLOAT(MIN_TEMP), &cfg.highTemp);  // 4
+  menu.addItem(PSTR("PERIOD (s)"),  GM_N_U_INT(10), &cfg.checkPeriod, GM_N_U_INT(10), GM_N_U_INT(3600));    // 5
+  menu.addItem(PSTR("Vumk. EKRAN(s)"), GM_N_U_INT(1) , &cfg.displayTimeout, GM_N_U_INT(2), &cfg.checkPeriod);// 6
+  menu.addItem(PSTR("Perev. EKRAN"), &cfg.flip);                                                             // 7
+  menu.addItem(PSTR("TEMP.CORR. (C)"), GM_N_FLOAT(0.5) , &cfg.tempCorrection, GM_N_FLOAT(-10), GM_N_FLOAT(10));// 8
+  menu.addItem(PSTR("RESET"));                                                                              // 9
+  menu.addItem(PSTR("<- M ->"), GM_N_BYTE(1), &rotateDirection, GM_N_BYTE(0), GM_N_BYTE(2));                // 10 
+  menu.addItem(PSTR("<<< EXIT"));                                                                           // 11
 
   eb.attach(encoder_cb);
 }
@@ -245,6 +252,7 @@ void resetSettings() {
   cfg.checkPeriod = def.checkPeriod;
   cfg.displayTimeout = def.displayTimeout;
   cfg.tempCorrection = def.tempCorrection;
+  cfg.flip = def.flip;
 
   saveSettings();
 }
@@ -256,7 +264,7 @@ void encoder_cb() {
       LOG(F("TURN:")); LOGN(eb.dir());
 
       if (menu.isMenuShowing) {
-        if (eb.dir() == 1) {
+        if (eb.dir() == 1 && !cfg.flip) {
           menu.selectPrev(eb.fast());
         } else {
           menu.selectNext(eb.fast());
@@ -289,21 +297,18 @@ void onMenuItemChange(const int index, const void* val, const byte valType) {
     } else if (index == 1) {
       closeValve();
       toggleMainScreen(true);
-    }  
-    else if (index == 7) {
-      resetSettings();
+    } 
+    else if (index == 2) {
+      stopValveAction();
     } 
     else if (index == 9) {
+      resetSettings();
+    } 
+    else if (index == 11) {
       toggleMainScreen(true);
     }
-  } else {
-    #ifdef DEBUG_ENABLE
+  } else { 
     if (index == 10) {
-      LOG("set manual new temp"); LOGN(cur_t);
-      checkTemperature();
-    } else 
-    #endif 
-    if (index == 8) {
       manualRunServo();
     } else      
     saveSettings();
@@ -311,7 +316,7 @@ void onMenuItemChange(const int index, const void* val, const byte valType) {
 }
 
 boolean onMenuItemPrintOverride(const int index, const void* val, const byte valType) {
-  if (index == 4) {
+  if (index == 5) {
     unsigned int minutes = cfg.checkPeriod / 60; // [mm]
     byte seconds = cfg.checkPeriod - (minutes * 60); // [ss]
     if (minutes < 10) {
@@ -326,7 +331,7 @@ boolean onMenuItemPrintOverride(const int index, const void* val, const byte val
     oled.print(seconds);
     
     return true;
-  } else if (index == 5) {
+  } else if (index == 6) {
     unsigned int minutes = cfg.displayTimeout / 60; // [mm]
     byte seconds = cfg.displayTimeout - (minutes * 60); // [ss]
     if (minutes < 10) {
@@ -343,7 +348,7 @@ boolean onMenuItemPrintOverride(const int index, const void* val, const byte val
     return true;
   }
   
-  else if (index == 8) {
+  else if (index == 10) {
     char label[10] = "";
     if (rotateDirection == 0)  strcat(label,  " UP " );
     else if (rotateDirection == 2) strcat(label,  "DOwN" );
@@ -459,6 +464,13 @@ void idleDisplayTrigger(){
 }
 
 void goToSleep() {
+  #ifndef DEBUG_ENABLE
+  // double clear 
+  if (!oledEnabled) {
+    oled.clearDisplay();
+    oled.display();
+  }
+  #endif
   #ifdef ENABLE_SLEEP
   LOG("Going to sleep now. Would wakeup after "); LOG(cfg.checkPeriod); LOGN(" seconds.");
   esp_deep_sleep_start();
@@ -543,9 +555,9 @@ void checkTemperature() {
   LOG("display on: "); LOG(oledEnabled);LOG(" opened: "); LOGN(isFullOpened);
   LOG("LOW: "); LOG(cfg.lowTemp); LOG(" CUR: "); LOG(cur_t); LOG(" HI: "); LOGN(cfg.highTemp);
   
-  if (cur_t >= cfg.highTemp) {
+  if (cur_t >= cfg.highTemp && !forceStop) {
     openValve();
-  } else if (cur_t < cfg.lowTemp) {
+  } else if (cur_t < cfg.lowTemp && !forceStop) {
     closeValve();
   }
 
@@ -566,7 +578,11 @@ void openValve() {
 
   servoOperation = 1;
   servo.writeMicroseconds(ROTATE_UPWARD);
+  forceStop = false;
   delay(KICK_DELAY); // wait few secconds to release endststop switch
+  #ifdef DEBUG_ENABLE
+  openCloseCounts++;
+  #endif
 }
 
 void closeValve() {
@@ -581,10 +597,22 @@ void closeValve() {
   LOG("!!!! Close valve with "); LOGN(ROTATE_DOWNWARD);
   servoOperation = 2;
   servo.writeMicroseconds(ROTATE_DOWNWARD);
+  forceStop = false;
   delay(KICK_DELAY); // wait few secconds to release endststop switch
+  #ifdef DEBUG_ENABLE
+  openCloseCounts++;
+  #endif
   
 }
 
+void stopValveAction() {
+  forceStop = true;
+  servo.writeMicroseconds(ROTATE_STOP);
+  servoOperation = 0;
+  animTimer.reset();
+  toggleMainScreen(true);  
+  defineWndOpenState();
+}
 
 void defineWndOpenState() {
   bool lowEndstopPressed = digitalRead(LOW_ENDSTOP_PIN);
@@ -601,26 +629,6 @@ void defineWndOpenState() {
   //   renderMainScreen();
   // }
 }
-
-// void on_hight_endstop_change() {
-//   bool state = digitalRead(HIGHT_ENDSTOP_PIN);
-//   LOG("on hight wnd_switch hangler: "); LOG(state); LOG(" current: "); LOGN(hightEndstopPressed);
-//   if (hightEndstopPressed == state) return;
-//   hightEndstopPressed = state;
-  
-//   LOG("on hight wnd_switch_change: "); LOGN(hightEndstopPressed);
-//   defineWndOpenState();
-// }
-
-// void on_low_endstop_change() {
-//   bool state = digitalRead(LOW_ENDSTOP_PIN);
-//   LOG("on low wnd_switch hangler: "); LOG(state); LOG(" current: "); LOGN(lowEndstopPressed);
-//   if (lowEndstopPressed == state) return;
-//   lowEndstopPressed = state;
-  
-//   LOG("on low wnd_switch_change: "); LOGN(lowEndstopPressed);
-//   defineWndOpenState();
-// }
 
 void manualRunServo() {
   LOG("Manual rotate: "); LOGN(rotateDirection);
@@ -649,7 +657,6 @@ void setup() {
   // delay(5000);
   #endif
 
-  ++bootCounts;
   prefs.begin("0");
   prefs.getBytes("0", &cfg, sizeof(cfg));
   
@@ -671,6 +678,8 @@ void setup() {
   dht.begin();
 
   readTemperature();
+  defineWndOpenState();
+
   initDisplay();
   initMenu();
   initServo();
@@ -688,9 +697,9 @@ void setup() {
     wakeDisplayTrigger();
     toggleMainScreen(true);
     displayIdleTimer.setTimeout(cfg.displayTimeout * 1000); 
-  }
+  }  
   
-  defineWndOpenState();
+  // defineWndOpenState();
   // readTemperature();
   renderMainScreen();
 
@@ -744,7 +753,7 @@ void loop() {
   if (temperatureTimer.isReady()) readTemperature();
   #endif
 
-  if (servoOperation > 0) {
+  if (servoOperation > 0 && !forceStop) {
     displayIdleTimer.reset();
     bool lowEndstopPressed = digitalRead(LOW_ENDSTOP_PIN);
     bool hightEndstopPressed = digitalRead(HIGHT_ENDSTOP_PIN);
